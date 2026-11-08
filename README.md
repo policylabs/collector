@@ -41,6 +41,7 @@ The following table lists all repository drivers currently implemented in the pr
 | **COCI** | `coci` | Reads and writes Sigstore bundle attestations on container image registries using the `cosign` method (`sha256-<digest>.att` tag). Also reads cosign `.sig` signatures and legacy `.sbom` SBOM layers (as unsigned statements). | `coci:docker.io/library/alpine:latest` | ✓ | ✓ |
 | **OCI** | `oci` | Reads and writes Sigstore bundle attestations attached as OCI referrers (cosign v3). | `oci:ghcr.io/foo/bar:v1` | ✓ | ✓ |
 | **Filesystem** | `fs` | Reads attestation files from a filesystem directory | `fs:/path/to/attestations` | ✓ | ✗ |
+| **Git** | `git` | Clones a repository at a ref (tag, branch or commit) and reads attestation files from the checkout; also describes the checked-out commit and, for an annotated tag, the tag as `gitobject` attestations | `git:https://github.com/owner/repo@v1.0.0#path` | ✓ | ✗ |
 | **GitHub** | `github` | Reads and writes attestations using the GitHub Attestations API | `github:owner/repo` | ✓ | ✓ |
 | **HTTP/HTTPS** | `http`, `https` | Fetches attestations from HTTP(S) endpoints serving JSONL or bundle formats | `https://example.com/attestations.jsonl` | ✓ | ✗ |
 | **JSONL** | `jsonl` | Reads attestations from JSON Lines (JSONL) formatted files | `jsonl:/path/to/file.jsonl` | ✓ | ✗ |

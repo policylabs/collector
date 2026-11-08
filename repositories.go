@@ -14,6 +14,7 @@ import (
 	"github.com/policylabs/collector/repository/actions"
 	"github.com/policylabs/collector/repository/coci"
 	"github.com/policylabs/collector/repository/filesystem"
+	"github.com/policylabs/collector/repository/git"
 	"github.com/policylabs/collector/repository/github"
 	"github.com/policylabs/collector/repository/gitsign"
 	"github.com/policylabs/collector/repository/http"
@@ -71,6 +72,7 @@ func LoadDefaultRepositoryTypes() error {
 		actions.TypeMoniker:     actions.Build,
 		coci.TypeMoniker:        coci.Build,
 		filesystem.TypeMoniker:  filesystem.Build,
+		git.TypeMoniker:         git.Build,
 		oci.TypeMoniker:         oci.Build,
 		gitsign.TypeMoniker:     gitsign.Build,
 		github.TypeMoniker:      github.Build,
