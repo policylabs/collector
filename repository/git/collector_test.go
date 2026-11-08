@@ -243,3 +243,33 @@ func TestCommitRef(t *testing.T) {
 		require.Len(t, all, 3, "two files at that commit plus the commit attestation")
 	}
 }
+
+// A subject query for a commit the locator did not land on fetches that
+// commit and describes it, so a chain reaching a commit on no branch still
+// finds its attestation; a sha that is no commit yields nothing.
+func TestFetchBySubjectDescribesOtherCommits(t *testing.T) {
+	t.Parallel()
+	path, head := fixtureRepo(t)
+	repo, err := git.PlainOpen(path)
+	require.NoError(t, err)
+	headCommit, err := repo.CommitObject(head)
+	require.NoError(t, err)
+	parent := headCommit.ParentHashes[0]
+	c, err := New(WithLocator(path))
+	require.NoError(t, err)
+	query := func(sha string) []attestation.Envelope {
+		t.Helper()
+		res, err := c.FetchBySubject(t.Context(), attestation.FetchOptions{}, []attestation.Subject{
+			&intoto.ResourceDescriptor{Digest: map[string]string{"gitCommit": sha}},
+		})
+		require.NoError(t, err)
+		return res
+	}
+	res := query(parent.String())
+	require.Len(t, res, 1)
+	require.Equal(t, gitpred.PredicateTypeCommit, res[0].GetStatement().GetPredicateType())
+	require.Equal(t, parent.String(), res[0].GetStatement().GetSubjects()[0].GetDigest()["gitCommit"])
+	require.Len(t, query(parent.String()), 1, "the described commit is remembered")
+	require.Empty(t, query("ffffffffffffffffffffffffffffffffffffffff"))
+	require.Len(t, query(head.String()), 1, "the checked-out commit is still served from the clone")
+}

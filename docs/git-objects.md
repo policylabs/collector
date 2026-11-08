@@ -31,7 +31,7 @@ and it is not the only paragraph. They are a map from token to the list of
 its values in message order. The parser attaches no meaning to any token.
 What `Evaluated-Commit` or `Signed-off-by` means is for whoever wrote the
 trailer and for the policy that reads it, so a policy chains through them
-with `predicate.trailers["Evaluated-Commit"][0]`.
+with `predicate.data.trailers["Evaluated-Commit"][0]`.
 
 ## Subjects
 
