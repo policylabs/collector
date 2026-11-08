@@ -1,0 +1,8 @@
+{
+  "object": "feedfacebeeffeedfacebeeffeedfacebeeffeed",
+  "objectType": "commit",
+  "name": "v1.2.0",
+  "tagger": {"name": "miniprow[bot]", "email": "1+miniprow[bot]@users.noreply.github.com", "date": "2026-11-08T10:02:00Z"},
+  "message": "Release v1.2.0\n\nCut by miniprow from a minor release request.\n\nEvaluated-Commit: deadbeefcafedeadbeefcafedeadbeefcafedead\nPull-Request: 7\nTree: 0123456789abcdef0123456789abcdef01234567\nMerge-Strategy: squash\n",
+  "trailers": {"Evaluated-Commit": ["deadbeefcafedeadbeefcafedeadbeefcafedead"], "Pull-Request": ["7"], "Tree": ["0123456789abcdef0123456789abcdef01234567"], "Merge-Strategy": ["squash"]}
+}

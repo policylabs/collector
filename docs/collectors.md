@@ -15,9 +15,23 @@ the list (`DefaultExtensions` holds the default one).
 
 ## git
 
-Clones a remote git repository (shallow, single-branch, depth 1) into
-memory and delegates to the **filesystem** collector to read attestations
-from the cloned worktree. `WithExtensions` is passed through to it.
+Clones a git repository into memory at the locator's ref and reads
+attestations from the checkout through the **filesystem** collector
+(`WithExtensions` is passed through to it). The ref after `@` may be a full
+reference name, a short tag or branch name (resolved against the remote,
+tags first), or a commit sha (fetched alone where the remote serves
+commits by id, as GitHub does; otherwise the history is cloned and the
+commit checked out). Without a ref the remote's HEAD is cloned shallow.
+
+The driver also describes the git object the locator lands on, as
+attestations synthesized by the [`gitobject` library](git-objects.md): the
+checked-out commit always (`https://carabiner.dev/git/commit/v0`, subjects
+the commit and its tree) and the tag when the ref is an annotated tag
+(`https://carabiner.dev/git/tag/v0`, subjects the tag object and its
+target). Their verification is the object's PGP signature, checked against
+the keys set with `SetKeys` and GitHub's web-flow key. A policy can thus
+chain from a release tag to its commit to its tree with every hop proven by
+git itself.
 
 ## github
 
