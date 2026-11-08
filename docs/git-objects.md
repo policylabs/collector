@@ -49,18 +49,29 @@ proven by git itself.
 
 ## Verification
 
-The package verifies PGP signatures against the keys it is given
-(`WithKeys`, `SetKeys`) and against the keys it ships with, today GitHub's
-web-flow key (`keys/github-web-flow.asc`, from <https://github.com/web-flow.gpg>),
-so a merge or squash commit GitHub made verifies as GitHub's with no
-configuration. The verification lists the key that verified as the signer's
-identity.
+The attestation's verification is the object's own signature, checked by
+the library and reported as the signer's identity:
 
-Sigstore (gitsign) signatures are not verified here: the gitsign driver is
-the authority for those and already describes the commits it signs. An
-unsigned object, an SSH-signed one or a signature no key verifies yields an
-attestation with no verification: "nothing established", never "forged".
-The policy decides what an unverified object is worth.
+- a **sigstore signature**, the CMS that gitsign writes, is verified the way
+  the gitsign driver verifies it, with the same code: the signature over
+  the object's bytes, the leaf certificate's chain to Fulcio, and the Rekor
+  transparency log entry, embedded (offline mode) or looked up (online
+  mode), against the trust root the signer library ships. The identity is
+  the certificate's issuer and subject.
+- a **PGP signature** is verified against the keys the verifier is given
+  (`WithKeys`, `SetKeys`) and the keys the package ships with, today
+  GitHub's web-flow key (`keys/github-web-flow.asc`, from
+  <https://github.com/web-flow.gpg>), so a merge or squash commit GitHub made
+  verifies as GitHub's with no configuration. The identity is the key.
+
+An unsigned object, an SSH-signed one or a signature that does not verify
+yields an attestation with no verification: "nothing established", never
+"forged". The policy decides what an unverified object is worth.
+
+The gitsign driver uses this same verifier for the gitsign attestations it
+synthesizes, so the two drivers never disagree about a signature. They
+differ in what they describe: gitsign's attestation states that gitsign
+signed the object, the git driver's states what the object contains.
 
 ## Use
 

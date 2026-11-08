@@ -14,6 +14,8 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	sapi "github.com/policylabs/signer/api/v1"
 	"github.com/policylabs/signer/key"
+	signersigstore "github.com/policylabs/signer/sigstore"
+	"github.com/sigstore/sigstore-go/pkg/root"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -48,14 +50,52 @@ func BuiltinKeys() ([]key.PublicKeyProvider, error) {
 	return builtinKeys, errBuiltinKeys
 }
 
-// Verifier checks the PGP signature of git objects against a key set.
+// Verifier checks the signatures of git objects: sigstore signatures (the
+// CMS gitsign writes) against the Fulcio chain and the Rekor transparency
+// log, PGP signatures against a key set.
 type Verifier struct {
 	mu   sync.RWMutex
 	keys []key.PublicKeyProvider
+	// rekorURL is the transparency log queried when a sigstore signature
+	// carries no embedded entry.
+	rekorURL string
+	// trustedRoot caches the resolved sigstore trust root so it is loaded
+	// once and reused across every verification.
+	trustedRootOnce sync.Once
+	trustedRoot     *root.TrustedRoot
+	trustedRootErr  error
+}
+
+// VerifierOption configures a Verifier.
+type VerifierOption func(*Verifier)
+
+// WithRekorURL sets the transparency log queried for online-mode sigstore
+// signatures (default DefaultRekorURL). Empty keeps the default.
+func WithRekorURL(url string) VerifierOption {
+	return func(v *Verifier) {
+		if url != "" {
+			v.rekorURL = url
+		}
+	}
 }
 
 // NewVerifier returns a Verifier that knows the built-in keys only.
-func NewVerifier() *Verifier { return &Verifier{} }
+func NewVerifier(opts ...VerifierOption) *Verifier {
+	v := &Verifier{rekorURL: DefaultRekorURL}
+	for _, opt := range opts {
+		opt(v)
+	}
+	return v
+}
+
+// trusted resolves and caches the sigstore public-good trust root from the
+// signer library (an embedded snapshot with a TUF-refresh fallback).
+func (v *Verifier) trusted() (*root.TrustedRoot, error) {
+	v.trustedRootOnce.Do(func() {
+		v.trustedRoot, v.trustedRootErr = signersigstore.TrustedRoot()
+	})
+	return v.trustedRoot, v.trustedRootErr
+}
 
 // SetKeys replaces the configured keys; the built-in keys stay.
 func (v *Verifier) SetKeys(keys []key.PublicKeyProvider) {
@@ -79,30 +119,40 @@ func (v *Verifier) Keys() []key.PublicKeyProvider {
 }
 
 // signedObject is a go-git commit or tag: it yields the bytes its
-// signature was computed over.
+// signature was computed over, and its own hash.
 type signedObject interface {
 	EncodeWithoutSignature(plumbing.EncodedObject) error
+	ID() plumbing.Hash
 }
 
-// Verify checks an object's signature and returns the verification, or nil
-// when the object is unsigned, carries a signature kind this verifier does
-// not handle (sigstore CMS, SSH), or no key verifies it. A nil result means
-// "nothing established", never "forged": the policy decides what an
-// unverified object is worth.
-func (v *Verifier) Verify(_ context.Context, obj signedObject, signature string) *sapi.Verification {
+// Verify checks an object's signature and returns the verification, with
+// the signer as a sigstore identity (issuer and subject from the Fulcio
+// certificate, the Rekor entry checked) or as the key that verified it. It
+// returns nil when the object is unsigned, carries a signature kind this
+// verifier does not handle (SSH), or the signature does not verify. A nil
+// result means "nothing established", never "forged": the policy decides
+// what an unverified object is worth.
+func (v *Verifier) Verify(ctx context.Context, obj signedObject, signature string) *sapi.Verification {
 	if signature == "" {
-		return nil
-	}
-	if block, _ := pem.Decode([]byte(signature)); block != nil && block.Type != "PGP SIGNATURE" {
-		// "SIGNED MESSAGE" is a sigstore CMS signature (gitsign's, the gitsign
-		// driver's to verify); "SSH SIGNATURE" is not handled.
-		logrus.Debugf("gitobject: %s signature not verified here", block.Type)
 		return nil
 	}
 	signed, err := encodeWithoutSignature(obj)
 	if err != nil {
 		logrus.Debugf("gitobject: encoding object without signature: %v", err)
 		return nil
+	}
+	if block, _ := pem.Decode([]byte(signature)); block != nil && block.Type != "PGP SIGNATURE" {
+		if block.Type != "SIGNED MESSAGE" {
+			logrus.Debugf("gitobject: %s signature not verified", block.Type)
+			return nil
+		}
+		// A sigstore CMS signature, as gitsign writes it.
+		verification, err := v.verifySigstoreSignature(ctx, signed, block.Bytes, []byte(obj.ID().String()))
+		if err != nil {
+			logrus.Debugf("gitobject: sigstore verification of %s failed: %v", obj.ID(), err)
+			return nil
+		}
+		return verification
 	}
 	builtin, err := BuiltinKeys()
 	if err != nil {
