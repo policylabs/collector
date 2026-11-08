@@ -3,12 +3,14 @@
 
 // Package git implements an attestations collector that works on a git
 // repository. It clones the locator's ref and reads attestations from the
-// checkout through the filesystem collector, and it describes the git object
-// the locator lands on: the checked-out commit always, and the tag when the
-// ref is an annotated tag, as attestations synthesized by the gitobject
-// library (predicate types https://carabiner.dev/git/commit/v0 and
-// https://carabiner.dev/git/tag/v0). A policy can thus chain from a tag to
-// its commit to its tree with every hop proven by git itself.
+// checkout through the filesystem collector, and it describes git objects as
+// attestations synthesized by the gitobject library (predicate types
+// https://carabiner.dev/git/commit/v0 and https://carabiner.dev/git/tag/v0):
+// the object the locator lands on, the checked-out commit always and the tag
+// when the ref is an annotated tag, and any other commit of the repository a
+// subject query asks about, fetched on demand. A policy can thus chain from a
+// tag to its commit to its tree, or to a commit no branch reaches any more,
+// with every hop proven by git itself.
 package git
 
 import (
@@ -17,6 +19,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/go-git/go-billy/v5"
 	"github.com/go-git/go-billy/v5/helper/iofs"
@@ -79,6 +82,10 @@ type Collector struct {
 	// objects are the attestations describing the checked-out commit and,
 	// when the ref is an annotated tag, the tag; built once at clone.
 	objects []attestation.Envelope
+	// described caches the attestations of commits fetched on demand for a
+	// subject query, by sha; a sha that could not be described is nil.
+	described   map[string]attestation.Envelope
+	describedMu sync.Mutex
 }
 
 // SetKeys sets the keys that verify detached signatures in the checkout and
@@ -116,7 +123,7 @@ func (c *Collector) clone(ctx context.Context) error {
 		}
 	} else {
 		// A commit: fetch only that object and check it out.
-		r, err = c.fetchCommit(ctx, fs, ref)
+		r, err = c.fetchCommit(ctx, fs, plumbing.Revision(ref))
 		if err != nil {
 			return err
 		}
@@ -182,11 +189,12 @@ func (c *Collector) resolveRef(ctx context.Context) (plumbing.ReferenceName, err
 	return "", fmt.Errorf("ref %q is neither a tag nor a branch on %s", ref, c.Options.URL)
 }
 
-// fetchCommit fetches a single commit into a fresh repository and checks it
-// out. A full sha is fetched alone where the remote allows fetching by
-// object id (GitHub does); elsewhere, and for an abbreviated sha, the
-// default branch is cloned in full and the commit resolved in it.
-func (c *Collector) fetchCommit(ctx context.Context, fs billy.Filesystem, sha plumbing.ReferenceName) (*git.Repository, error) {
+// fetchCommit fetches a single commit into a fresh repository and, when fs
+// is not nil, checks it out there. A full sha is fetched alone where the
+// remote allows fetching by object id (GitHub does); elsewhere, and for an
+// abbreviated sha, the default branch is cloned in full and the commit
+// resolved in it.
+func (c *Collector) fetchCommit(ctx context.Context, fs billy.Filesystem, sha plumbing.Revision) (*git.Repository, error) {
 	if len(sha) == 40 {
 		r, err := git.Init(memory.NewStorage(), fs)
 		if err != nil {
@@ -204,6 +212,9 @@ func (c *Collector) fetchCommit(ctx context.Context, fs billy.Filesystem, sha pl
 		})
 		switch {
 		case err == nil || errors.Is(err, git.NoErrAlreadyUpToDate):
+			if fs == nil {
+				return r, nil
+			}
 			return r, checkout(r, &git.CheckoutOptions{Branch: local})
 		case strings.Contains(err.Error(), "exact SHA1"):
 			logrus.Debugf("git: %s does not serve commits by sha, cloning history", c.Options.URL)
@@ -211,15 +222,44 @@ func (c *Collector) fetchCommit(ctx context.Context, fs billy.Filesystem, sha pl
 			return nil, fmt.Errorf("fetching commit %s: %w", sha, err)
 		}
 	}
-	r, err := git.CloneContext(ctx, memory.NewStorage(), fs, &git.CloneOptions{URL: c.Options.URL, Tags: git.NoTags})
+	r, err := git.CloneContext(ctx, memory.NewStorage(), fs, &git.CloneOptions{URL: c.Options.URL, Tags: git.NoTags, NoCheckout: fs == nil})
 	if err != nil {
 		return nil, fmt.Errorf("cloning repo: %w", err)
 	}
-	hash, err := r.ResolveRevision(plumbing.Revision(sha))
+	hash, err := r.ResolveRevision(sha)
 	if err != nil {
 		return nil, fmt.Errorf("resolving commit %s: %w", sha, err)
 	}
+	if fs == nil {
+		return r, nil
+	}
 	return r, checkout(r, &git.CheckoutOptions{Hash: *hash})
+}
+
+// describeCommit returns the attestation of a commit a subject query asks
+// about: the checked-out one when it is that, otherwise the commit is
+// fetched alone, described and remembered. A sha that is not a commit of
+// the repository, or cannot be reached, yields nil.
+func (c *Collector) describeCommit(ctx context.Context, sha string) attestation.Envelope {
+	c.describedMu.Lock()
+	defer c.describedMu.Unlock()
+	if env, ok := c.described[sha]; ok {
+		return env
+	}
+	if c.described == nil {
+		c.described = map[string]attestation.Envelope{}
+	}
+	var env attestation.Envelope
+	if r, err := c.fetchCommit(ctx, nil, plumbing.Revision(sha)); err != nil {
+		logrus.Debugf("git: not describing %s: %v", sha, err)
+	} else if hash, err := r.ResolveRevision(plumbing.Revision(sha)); err != nil {
+		logrus.Debugf("git: not describing %s: %v", sha, err)
+	} else if env, err = c.synthesizer.Commit(ctx, r, *hash); err != nil {
+		logrus.Debugf("git: not describing %s: %v", sha, err)
+		env = nil
+	}
+	c.described[sha] = env
+	return env
 }
 
 func checkout(r *git.Repository, opts *git.CheckoutOptions) error {
@@ -281,7 +321,10 @@ func (c *Collector) Fetch(ctx context.Context, opts attestation.FetchOptions) ([
 }
 
 // FetchBySubject returns the attestations whose subjects carry any of the
-// digests, from the described objects and from the checkout.
+// digests: the described objects, the checkout's files, and, for a commit
+// sha the checkout does not describe, that commit fetched on demand. This
+// is how a chain that lands on a commit no branch reaches any more, a pull
+// request's head after a squash, still finds the commit described.
 func (c *Collector) FetchBySubject(ctx context.Context, opts attestation.FetchOptions, subj []attestation.Subject) ([]attestation.Envelope, error) {
 	if err := c.ensureClone(ctx); err != nil {
 		return nil, err
@@ -295,7 +338,28 @@ func (c *Collector) FetchBySubject(ctx context.Context, opts attestation.FetchOp
 		matcher.HashSets = append(matcher.HashSets, s.GetDigest())
 	}
 	objects := attestation.NewQuery().WithFilter(matcher).Run(c.objects)
+	if len(objects) == 0 {
+		for sha := range commitShas(subj) {
+			if env := c.describeCommit(ctx, sha); env != nil {
+				objects = append(objects, env)
+			}
+		}
+		objects = attestation.NewQuery().WithFilter(matcher).Run(objects)
+	}
 	return limit(append(objects, files...), opts), nil
+}
+
+// commitShas returns the full commit shas the subjects name.
+func commitShas(subj []attestation.Subject) map[string]struct{} {
+	shas := map[string]struct{}{}
+	for _, s := range subj {
+		for _, algo := range []string{"sha1", "gitCommit"} {
+			if v := s.GetDigest()[algo]; len(v) == 40 {
+				shas[v] = struct{}{}
+			}
+		}
+	}
+	return shas
 }
 
 // FetchByPredicateType returns the attestations of the given types, from the

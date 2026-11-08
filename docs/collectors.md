@@ -29,9 +29,16 @@ checked-out commit always (`https://carabiner.dev/git/commit/v0`, subjects
 the commit and its tree) and the tag when the ref is an annotated tag
 (`https://carabiner.dev/git/tag/v0`, subjects the tag object and its
 target). Their verification is the object's PGP signature, checked against
-the keys set with `SetKeys` and GitHub's web-flow key. A policy can thus
-chain from a release tag to its commit to its tree with every hop proven by
-git itself.
+the keys set with `SetKeys` and GitHub's web-flow key.
+
+A subject query naming a commit the checkout does not describe fetches
+that commit alone (or, where the remote does not serve commits by id,
+clones the history and finds it) and describes it the same way, once per
+sha. A chain that lands on a commit no branch reaches any more, a pull
+request's head after a squash, thus still finds the commit described
+without anyone naming it up front. A policy can chain from a release tag
+to its commit to its tree, or to the evaluated head, with every hop proven
+by git itself.
 
 ## github
 
