@@ -147,6 +147,19 @@ Two kinds of detached signatures are supported:
 
 For full details see [virtual-attestations.md](docs/virtual-attestations.md).
 
+## Attestations from Git Objects
+
+The `gitobject` library synthesizes attestations from git objects: a commit
+or an annotated tag becomes a statement whose predicate is the object's
+content (`https://carabiner.dev/git/commit/v0`, `https://carabiner.dev/git/tag/v0`,
+trailers included as git defines them) and whose subjects are what the
+object's bytes prove: the commit and its tree, the tag and its target. The
+object's PGP signature, checked against the configured keys and GitHub's
+web-flow key, is the predicate's verification. Git-related drivers use it to
+describe the objects they read, so a policy can chain from a tag to a
+commit to a tree with every hop proven by git itself. See
+[git-objects.md](docs/git-objects.md).
+
 ## Attestation Queries
 
 An _Attestation Query_ subsets a group of _Envelopes_ by applying a series of
