@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Carabiner Systems, Inc
 // SPDX-License-Identifier: Apache-2.0
 
-package gitsign
+package gitobject
 
 import (
 	"context"
@@ -112,8 +112,8 @@ func loadFixtureCMS(t *testing.T) fixtureCMS {
 func TestVerifyOfflineCommit_Positive(t *testing.T) {
 	commit := loadOfflineCommit(t)
 
-	c := &Collector{}
-	v := c.extractVerification(context.Background(), commit)
+	ver := NewVerifier()
+	v := ver.Verify(context.Background(), commit, commit.PGPSignature)
 
 	require.NotNil(t, v, "offline-signed commit must produce a verification")
 	require.NotNil(t, v.GetSignature())
@@ -130,12 +130,12 @@ func TestVerifyOfflineCommit_Positive(t *testing.T) {
 // bound to THIS commit: flipping one byte of the covered bytes must fail.
 func TestVerifyOfflineCommit_TamperedBody(t *testing.T) {
 	f := loadFixtureCMS(t)
-	c := &Collector{}
+	ver := NewVerifier()
 
 	tampered := append([]byte(nil), f.body...)
 	tampered[len(tampered)/2] ^= 0xff
 
-	v, err := c.verifySigstoreSignature(context.Background(), tampered, f.cmsRaw, nil)
+	v, err := ver.verifySigstoreSignature(context.Background(), tampered, f.cmsRaw, nil)
 	require.Error(t, err, "flipping a commit byte must fail verification")
 	require.Nil(t, v)
 }
@@ -144,7 +144,7 @@ func TestVerifyOfflineCommit_TamperedBody(t *testing.T) {
 // checked: flipping a byte of si.Signature (and re-serializing) must fail.
 func TestVerifyOfflineCommit_TamperedSignature(t *testing.T) {
 	commit := loadOfflineCommit(t)
-	c := &Collector{}
+	ver := NewVerifier()
 
 	block, _ := pem.Decode([]byte(commit.PGPSignature))
 	require.NotNil(t, block)
@@ -160,7 +160,7 @@ func TestVerifyOfflineCommit_TamperedSignature(t *testing.T) {
 	body, err := encodeWithoutSignature(commit)
 	require.NoError(t, err)
 
-	v, err := c.verifySigstoreSignature(context.Background(), body, der, nil)
+	v, err := ver.verifySigstoreSignature(context.Background(), body, der, nil)
 	require.Error(t, err, "a tampered signature must fail verification")
 	require.Nil(t, v)
 }
@@ -254,11 +254,11 @@ func TestVerifyOnlineEntry_Converter(t *testing.T) {
 		"inclusion proof leaf index must be preserved distinct from the global log index")
 	require.NotEmpty(t, entryProto.GetInclusionPromise().GetSignedEntryTimestamp())
 
-	c := &Collector{}
-	tr, err := c.trusted()
+	ver := NewVerifier()
+	tr, err := ver.trusted()
 	require.NoError(t, err)
 
-	v, err := c.verifyEntry(context.Background(), f.leaf, f.si.Signature, digest, entryProto, tr)
+	v, err := ver.verifyEntry(context.Background(), f.leaf, f.si.Signature, digest, entryProto, tr)
 	require.NoError(t, err)
 	require.NotNil(t, v)
 	require.True(t, v.GetSignature().GetVerified())
@@ -277,9 +277,9 @@ func TestVerifyOnlineCommit_MockRekor(t *testing.T) {
 	require.NoError(t, err)
 
 	url := mockRekor(t, []string{rekorFixtureUUID}, raw)
-	c := &Collector{Options: Options{RekorURL: url}}
+	ver := NewVerifier(WithRekorURL(url))
 
-	v, err := c.verifySigstoreSignature(context.Background(), body, der, []byte(f.commit.Hash.String()))
+	v, err := ver.verifySigstoreSignature(context.Background(), body, der, []byte(f.commit.Hash.String()))
 	require.NoError(t, err)
 	require.NotNil(t, v, "online-mode commit must verify once the entry is fetched")
 	require.True(t, v.GetSignature().GetVerified())
@@ -293,9 +293,9 @@ func TestLookupTlogEntry_NotFound(t *testing.T) {
 	digest := fixtureDigest(t, &f)
 
 	url := mockRekor(t, []string{}, nil)
-	c := &Collector{Options: Options{RekorURL: url}}
+	ver := NewVerifier(WithRekorURL(url))
 
-	entryProto, err := c.lookupTlogEntry(context.Background(), f.leaf, f.si.Signature, digest)
+	entryProto, err := ver.lookupTlogEntry(context.Background(), f.leaf, f.si.Signature, digest)
 	require.Error(t, err)
 	require.Nil(t, entryProto)
 }
@@ -314,9 +314,9 @@ func TestLookupTlogEntry_NoMatch(t *testing.T) {
 	require.NoError(t, err)
 
 	url := mockRekor(t, []string{rekorFixtureUUID}, raw)
-	c := &Collector{Options: Options{RekorURL: url}}
+	ver := NewVerifier(WithRekorURL(url))
 
-	entryProto, err := c.lookupTlogEntry(context.Background(), f.leaf, f.si.Signature, digest)
+	entryProto, err := ver.lookupTlogEntry(context.Background(), f.leaf, f.si.Signature, digest)
 	require.Error(t, err)
 	require.Nil(t, entryProto)
 }
@@ -333,12 +333,12 @@ func TestVerifyEntry_WrongDigest(t *testing.T) {
 	entryProto, err := logEntryToProto(anon, body)
 	require.NoError(t, err)
 
-	c := &Collector{}
-	tr, err := c.trusted()
+	ver := NewVerifier()
+	tr, err := ver.trusted()
 	require.NoError(t, err)
 
 	wrongDigest := make([]byte, sha256.Size) // all zeros: not what the signature covers
-	v, err := c.verifyEntry(context.Background(), f.leaf, f.si.Signature, wrongDigest, entryProto, tr)
+	v, err := ver.verifyEntry(context.Background(), f.leaf, f.si.Signature, wrongDigest, entryProto, tr)
 	require.Error(t, err)
 	require.Nil(t, v)
 }
@@ -379,8 +379,8 @@ func TestVerifyOnlineCommit_Live(t *testing.T) {
 	f := loadFixtureCMS(t)
 	body, der := stripEmbeddedEntry(t, f.commit)
 
-	c := &Collector{} // default: https://rekor.sigstore.dev
-	v, err := c.verifySigstoreSignature(context.Background(), body, der, []byte(f.commit.Hash.String()))
+	ver := NewVerifier() // default: https://rekor.sigstore.dev
+	v, err := ver.verifySigstoreSignature(context.Background(), body, der, []byte(f.commit.Hash.String()))
 	require.NoError(t, err)
 	require.NotNil(t, v)
 	require.True(t, v.GetSignature().GetVerified())
@@ -473,9 +473,9 @@ func TestVerifyLegacyOnlineCommit_MockRekor(t *testing.T) {
 	require.NoError(t, err)
 
 	url := mockRekor(t, []string{legacyFixtureUUID}, raw)
-	c := &Collector{Options: Options{RekorURL: url}}
+	ver := NewVerifier(WithRekorURL(url))
 
-	v, err := c.verifySigstoreSignature(context.Background(), signedData, block.Bytes, []byte(commit.Hash.String()))
+	v, err := ver.verifySigstoreSignature(context.Background(), signedData, block.Bytes, []byte(commit.Hash.String()))
 	require.NoError(t, err, "a legacy online-mode commit must verify via the legacy lookup")
 	require.NotNil(t, v)
 	require.True(t, v.GetSignature().GetVerified())
