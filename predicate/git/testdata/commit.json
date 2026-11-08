@@ -1,0 +1,8 @@
+{
+  "tree": "0123456789abcdef0123456789abcdef01234567",
+  "parents": ["89abcdef0123456789abcdef0123456789abcdef"],
+  "author": {"name": "Adolfo García Veytia", "email": "puerco@example.com", "date": "2026-11-08T10:00:00Z"},
+  "committer": {"name": "GitHub", "email": "noreply@github.com", "date": "2026-11-08T10:01:00Z"},
+  "message": "Tell merge observers the commit the merge produced (#7)\n\nSigned-off-by: Adolfo García Veytia <puerco@example.com>\nTag-commit-as: minor\n",
+  "trailers": {"Signed-off-by": ["Adolfo García Veytia <puerco@example.com>"], "Tag-commit-as": ["minor"]}
+}

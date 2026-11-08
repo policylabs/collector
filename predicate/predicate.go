@@ -13,6 +13,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/policylabs/collector/predicate/cyclonedx"
+	"github.com/policylabs/collector/predicate/git"
 	"github.com/policylabs/collector/predicate/json"
 	"github.com/policylabs/collector/predicate/openeox"
 	"github.com/policylabs/collector/predicate/openvex"
@@ -54,6 +55,8 @@ var Parsers = ParsersList{
 	slsa.PredicateType11:            slsa.NewParserV11(),
 	slsa.PredicateType02:            slsa.NewParserV02(),
 	vsa.PredicateType:               vsa.NewParser(),
+	git.PredicateTypeCommit:         git.New(),
+	git.PredicateTypeTag:            git.New(),
 }
 
 type ParseOption func(*Options)
