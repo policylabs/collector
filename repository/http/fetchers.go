@@ -26,7 +26,7 @@ func fetchGeneral(ctx context.Context, opts *Options, fo attestation.FetchOption
 	maxSize := readlimit.Resolve(fo.MaxReadSize)
 
 	// Create the agent
-	a := http.NewAgent().WithRetries(opts.Retries).WithFailOnHTTPError(true)
+	a := agent(opts)
 
 	var attestations []attestation.Envelope
 	var err error
@@ -140,7 +140,7 @@ func fetchBySubject(ctx context.Context, opts *Options, fo attestation.FetchOpti
 
 	maxSize := readlimit.Resolve(fo.MaxReadSize)
 	attestations := []attestation.Envelope{}
-	datas, errs := http.NewAgent().WithRetries(opts.Retries).WithFailOnHTTPError(true).GetGroupContext(ctx, urls)
+	datas, errs := agent(opts).GetGroupContext(ctx, urls)
 	for i, data := range datas {
 		if errs[i] != nil {
 			if strings.Contains(errs[i].Error(), "HTTP error 404") {
@@ -186,7 +186,7 @@ func fetchByPredicateType(ctx context.Context, opts *Options, fo attestation.Fet
 	}
 	maxSize := readlimit.Resolve(fo.MaxReadSize)
 	attestations := []attestation.Envelope{}
-	datas, errs := http.NewAgent().WithRetries(opts.Retries).WithFailOnHTTPError(true).GetGroupContext(ctx, urls)
+	datas, errs := agent(opts).GetGroupContext(ctx, urls)
 	for i, data := range datas {
 		if errs[i] != nil {
 			if strings.Contains(errs[i].Error(), "HTTP error 404") {
@@ -215,4 +215,10 @@ func fetchByPredicateType(ctx context.Context, opts *Options, fo attestation.Fet
 		}
 	}
 	return attestations, nil
+}
+
+// agent builds the HTTP agent the fetchers share: the configured retries
+// and timeout, and HTTP errors reported as failures.
+func agent(opts *Options) *http.Agent {
+	return http.NewAgent().WithRetries(opts.Retries).WithTimeout(opts.Timeout).WithFailOnHTTPError(true)
 }
