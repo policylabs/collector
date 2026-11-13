@@ -3,7 +3,10 @@
 
 package http
 
-import "net/url"
+import (
+	"net/url"
+	"time"
+)
 
 type optFn = func(*Options) error
 
@@ -19,6 +22,11 @@ type Options struct {
 	TemplatePredicateTypeSubject string
 	Retries                      uint
 	ReadJSONL                    bool
+	// Timeout bounds each HTTP request, headers and body. The library's
+	// default of three seconds is too tight for a release asset served
+	// through a redirect to a storage host, which is where attestations
+	// published with a release live.
+	Timeout time.Duration
 }
 
 func (o *Options) CanFetchSubject() bool {
@@ -46,6 +54,17 @@ func WithReadJSONL(doit bool) optFn {
 func WithRetries(num uint) optFn {
 	return func(opts *Options) error {
 		opts.Retries = num
+		return nil
+	}
+}
+
+// WithTimeout bounds each HTTP request (default DefaultTimeout). Zero or
+// negative keeps the default.
+func WithTimeout(timeout time.Duration) optFn {
+	return func(opts *Options) error {
+		if timeout > 0 {
+			opts.Timeout = timeout
+		}
 		return nil
 	}
 }
