@@ -16,7 +16,6 @@ import (
 	"github.com/carabiner-dev/hasher"
 	gointoto "github.com/in-toto/attestation/go/v1"
 	"github.com/policylabs/attestation"
-	"github.com/policylabs/signer"
 	sapi "github.com/policylabs/signer/api/v1"
 	"github.com/policylabs/signer/key"
 	"github.com/policylabs/signer/options"
@@ -29,6 +28,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/policylabs/collector/envelope"
+	"github.com/policylabs/collector/internal/verifier"
 	"github.com/policylabs/collector/predicate/generic"
 	"github.com/policylabs/collector/statement/intoto"
 )
@@ -221,12 +221,12 @@ func (c *Collector) processRawSignature(ctx context.Context, path, ext string, f
 }
 
 // verifySigstoreBundle verifies a parsed sigstore bundle and extracts
-// the signing identity from its certificate.
+// the signing identity from its certificate. It verifies with the verifier
+// shared by the whole process: building one resolves the sigstore trusted
+// roots (a TUF refresh over the network when the embedded ones have aged),
+// which a directory or a release with many bundles must not pay per file.
 func (c *Collector) verifySigstoreBundle(bundle *sigstore.Bundle) (*sapi.Verification, error) {
-	verifier := signer.NewVerifier()
-	verifier.Options.SkipIdentityCheck = true
-
-	if _, err := verifier.VerifyParsedBundle(
+	if _, err := verifier.Default().VerifyParsedBundle(
 		&sgbundle.Bundle{Bundle: bundle},
 		options.WithSkipIdentityCheck(true),
 	); err != nil {
@@ -292,11 +292,11 @@ func (c *Collector) verifyWithKeys(artifactPath string, sigData []byte) (*sapi.V
 		return nil, fmt.Errorf("reading artifact: %w", err)
 	}
 
-	verifier := key.NewVerifier()
+	keyVerifier := key.NewVerifier()
 	var identities []*sapi.Identity
 
 	for _, pkp := range c.Keys {
-		verified, err := verifier.VerifyMessage(pkp, artifactContent, sigData)
+		verified, err := keyVerifier.VerifyMessage(pkp, artifactContent, sigData)
 		if err != nil {
 			logrus.Debugf("key verification error: %v", err)
 			continue

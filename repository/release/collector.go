@@ -20,6 +20,12 @@ var _ attestation.Fetcher = (*Collector)(nil)
 
 var TypeMoniker = "release"
 
+// parallelDownloads is how many release assets are downloaded at a time.
+// Attestations and their sidecars are small files, so the time goes to
+// round trips and not to bandwidth: ghrfs's default of three makes a
+// release with a hundred of them wait on the queue.
+const parallelDownloads = 8
+
 // Implement the factory function
 var Build = func(istr string) (attestation.Repository, error) {
 	return New(WithReleaseURL(istr))
@@ -48,6 +54,7 @@ func New(funcs ...optFn) (*Collector, error) {
 		ghrfs.WithToken(c.Options.Token),
 		ghrfs.WithRetries(c.Options.Retries),
 		ghrfs.WithCache(true),
+		ghrfs.WithParallelDownloads(parallelDownloads),
 		ghrfs.WithCacheExtensions(cacheExtensions(c.Options.Extensions)),
 	)
 	if err != nil {
@@ -93,7 +100,28 @@ func (c *Collector) SetKeys(keys []key.PublicKeyProvider) {
 // Fetch queries the repository and retrieves any attestations matching the query.
 // Attestations are read from the release assets and, for immutable releases,
 // from the attestation GitHub generates for the release itself.
+//
+// The two sources do not depend on each other, so the release attestations
+// are looked up in GitHub's API while the assets are read. The assets come
+// first in the result and count first towards the fetch limit: when they
+// meet it on their own the lookup is abandoned.
 func (c *Collector) Fetch(ctx context.Context, opts attestation.FetchOptions) ([]attestation.Envelope, error) {
+	lookupCtx, abandon := context.WithCancel(ctx)
+	defer abandon()
+	lookup := make(chan releaseLookup, 1)
+	go func() {
+		var res releaseLookup
+		defer func() {
+			// The lookup parses remote data away from the caller's
+			// goroutine, where a panic would take the process down.
+			if r := recover(); r != nil {
+				res = releaseLookup{err: fmt.Errorf("panic: %v", r)}
+			}
+			lookup <- res
+		}()
+		res.atts, res.err = c.fetchReleaseAttestations(lookupCtx, opts)
+	}()
+
 	atts, err := c.Driver.Fetch(ctx, opts)
 	if err != nil {
 		return nil, err
@@ -102,10 +130,11 @@ func (c *Collector) Fetch(ctx context.Context, opts attestation.FetchOptions) ([
 		return atts[:opts.Limit], nil
 	}
 
-	relAtts, err := c.fetchReleaseAttestations(ctx, opts)
-	if err != nil {
-		return nil, fmt.Errorf("reading release attestations: %w", err)
+	res := <-lookup
+	if res.err != nil {
+		return nil, fmt.Errorf("reading release attestations: %w", res.err)
 	}
+	relAtts := res.atts
 	if opts.Query != nil {
 		relAtts = opts.Query.Run(relAtts)
 	}
@@ -114,6 +143,12 @@ func (c *Collector) Fetch(ctx context.Context, opts attestation.FetchOptions) ([
 		atts = atts[:opts.Limit]
 	}
 	return atts, nil
+}
+
+// releaseLookup is the outcome of looking up a release's own attestations.
+type releaseLookup struct {
+	atts []attestation.Envelope
+	err  error
 }
 
 // FetchBySubject retrieves the release attestations matching the subjects.
