@@ -20,6 +20,12 @@ var _ attestation.Fetcher = (*Collector)(nil)
 
 var TypeMoniker = "release"
 
+// parallelDownloads is how many release assets are downloaded at a time.
+// Attestations and their sidecars are small files, so the time goes to
+// round trips and not to bandwidth: ghrfs's default of three makes a
+// release with a hundred of them wait on the queue.
+const parallelDownloads = 8
+
 // Implement the factory function
 var Build = func(istr string) (attestation.Repository, error) {
 	return New(WithReleaseURL(istr))
@@ -48,6 +54,7 @@ func New(funcs ...optFn) (*Collector, error) {
 		ghrfs.WithToken(c.Options.Token),
 		ghrfs.WithRetries(c.Options.Retries),
 		ghrfs.WithCache(true),
+		ghrfs.WithParallelDownloads(parallelDownloads),
 		ghrfs.WithCacheExtensions(cacheExtensions(c.Options.Extensions)),
 	)
 	if err != nil {
