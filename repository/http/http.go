@@ -8,6 +8,7 @@ package http
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/policylabs/attestation"
 )
@@ -54,7 +55,13 @@ type CollectorPredicateTypeSubject struct {
 	Options Options
 }
 
+// DefaultTimeout bounds each attempt of an HTTP request. A timed-out attempt
+// is retried (Retries, three by default, with backoff), so a slow host gets
+// several chances while a dead one fails within about a minute.
+const DefaultTimeout = 15 * time.Second
+
 var defaultOptions = Options{
+	Timeout:   DefaultTimeout,
 	Retries:   3,
 	ReadJSONL: true,
 }

@@ -51,7 +51,11 @@ bundles. Also supports storing attestations via the upload endpoint.
 A general-purpose HTTP collector that fetches attestation data from one or
 more URLs. Supports Go `text/template` URL patterns for subject name,
 subject digest, subject URI, and predicate type, enabling the collector to
-construct URLs dynamically. Responses are parsed as JSONL by default.
+construct URLs dynamically. Responses are parsed as JSONL by default. Each
+attempt is bounded by `WithTimeout` (15 seconds by default; the HTTP
+library's own default of three seconds is too tight for a release asset
+served through a redirect) and a timed-out or failed attempt is retried
+`WithRetries` times (three by default, with backoff).
 
 Depending on the configured URL templates, `New()` returns one of several
 collector variants that implement different combinations of the fetcher
