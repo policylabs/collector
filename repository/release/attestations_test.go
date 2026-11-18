@@ -6,11 +6,13 @@ package release
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	ita "github.com/in-toto/attestation/go/v1"
 	"github.com/policylabs/attestation"
@@ -138,16 +140,56 @@ func TestFetchReleaseAttestations(t *testing.T) {
 		require.Empty(t, atts)
 	})
 
-	t.Run("limit-already-met-skips-lookup", func(t *testing.T) {
+	t.Run("limit-already-met-abandons-lookup", func(t *testing.T) {
 		t.Parallel()
-		var called atomic.Bool
-		c := releaseServer(t, true, func(http.ResponseWriter, *http.Request) { called.Store(true) })
-		c.Driver = &fixedDriver{n: 2}
+		// The assets are only handed over once the lookup has reached the
+		// attestations endpoint, which then waits to be abandoned: the fetch
+		// can only return if the two run side by side and the limit cuts the
+		// lookup short.
+		reached := make(chan struct{})
+		abandoned := make(chan struct{})
+		c := releaseServer(t, true, func(_ http.ResponseWriter, r *http.Request) {
+			close(reached)
+			<-r.Context().Done()
+			close(abandoned)
+		})
+		c.Driver = &fixedDriver{n: 2, wait: reached}
 
 		atts, err := c.Fetch(t.Context(), attestation.FetchOptions{Limit: 2})
 		require.NoError(t, err)
 		require.Len(t, atts, 2)
-		require.False(t, called.Load())
+
+		select {
+		case <-abandoned:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the release attestations lookup was not abandoned")
+		}
+	})
+
+	t.Run("assets-come-first", func(t *testing.T) {
+		t.Parallel()
+		c := releaseServer(t, true, serveFixture(t))
+		c.Driver = &fixedDriver{n: 2}
+
+		atts, err := c.Fetch(t.Context(), attestation.FetchOptions{})
+		require.NoError(t, err)
+		require.Len(t, atts, 3)
+		require.IsType(t, fakeEnvelope{}, atts[0])
+		require.IsType(t, fakeEnvelope{}, atts[1])
+		require.Equal(t, releasePredicate, atts[2].GetStatement().GetPredicateType())
+
+		atts, err = c.Fetch(t.Context(), attestation.FetchOptions{Limit: 3})
+		require.NoError(t, err)
+		require.Len(t, atts, 3)
+	})
+
+	t.Run("assets-error-wins", func(t *testing.T) {
+		t.Parallel()
+		c := releaseServer(t, true, serveFixture(t))
+		c.Driver = failingDriver{}
+
+		_, err := c.Fetch(t.Context(), attestation.FetchOptions{})
+		require.ErrorIs(t, err, errAssets)
 	})
 }
 
@@ -172,12 +214,32 @@ func TestFetchReleaseAttestationsAnonymous(t *testing.T) {
 }
 
 // fixedDriver returns n placeholder envelopes, standing in for release assets.
-type fixedDriver struct{ n int }
+// When wait is set it only answers once the channel is closed.
+type fixedDriver struct {
+	n    int
+	wait <-chan struct{}
+}
 
-func (d *fixedDriver) Fetch(context.Context, attestation.FetchOptions) ([]attestation.Envelope, error) {
+func (d *fixedDriver) Fetch(ctx context.Context, _ attestation.FetchOptions) ([]attestation.Envelope, error) {
+	if d.wait != nil {
+		select {
+		case <-d.wait:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	envs := make([]attestation.Envelope, d.n)
 	for i := range envs {
 		envs[i] = fakeEnvelope{}
 	}
 	return envs, nil
+}
+
+var errAssets = errors.New("reading assets")
+
+// failingDriver stands in for release assets that cannot be read.
+type failingDriver struct{}
+
+func (failingDriver) Fetch(context.Context, attestation.FetchOptions) ([]attestation.Envelope, error) {
+	return nil, errAssets
 }
