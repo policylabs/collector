@@ -12,6 +12,6 @@ jobs:
     permissions:
       contents: write # needed for storing the vsa in the repo.
       id-token: write # meeded to mint yokens for signing
-    uses: slsa-framework/source-actions/.github/workflows/compute_slsa_source.yml@dea965cdca5e0cb422bf7b2653c9d15f678ad01c # v0.1.0
+    uses: slsa-framework/actions/.github/workflows/compute_slsa_source.yml@3efdf6f2112b1170cb369442620788752df11bca # v0.2.0
     with:
       allow-merge-commits: true
