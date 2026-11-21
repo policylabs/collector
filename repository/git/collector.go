@@ -114,6 +114,7 @@ func (c *Collector) clone(ctx context.Context) error {
 		// Make a shallow clone of the repo to memory
 		r, err = git.CloneContext(ctx, memory.NewStorage(), fs, &git.CloneOptions{
 			URL:           c.Options.URL,
+			Auth:          c.Options.Auth,
 			ReferenceName: ref,
 			SingleBranch:  true,
 			Depth:         1,
@@ -173,7 +174,7 @@ func (c *Collector) resolveRef(ctx context.Context) (plumbing.ReferenceName, err
 		Name: remoteName,
 		URLs: []string{c.Options.URL},
 	})
-	refs, err := remote.ListContext(ctx, &git.ListOptions{})
+	refs, err := remote.ListContext(ctx, &git.ListOptions{Auth: c.Options.Auth})
 	if err != nil {
 		return "", fmt.Errorf("listing remote refs to resolve %q: %w", ref, err)
 	}
@@ -206,6 +207,7 @@ func (c *Collector) fetchCommit(ctx context.Context, fs billy.Filesystem, sha pl
 		local := plumbing.NewBranchReferenceName("collector")
 		err = r.FetchContext(ctx, &git.FetchOptions{
 			RemoteName: remoteName,
+			Auth:       c.Options.Auth,
 			Depth:      1,
 			Tags:       git.NoTags,
 			RefSpecs:   []config.RefSpec{config.RefSpec(fmt.Sprintf("+%s:%s", sha, local))},
@@ -222,7 +224,9 @@ func (c *Collector) fetchCommit(ctx context.Context, fs billy.Filesystem, sha pl
 			return nil, fmt.Errorf("fetching commit %s: %w", sha, err)
 		}
 	}
-	r, err := git.CloneContext(ctx, memory.NewStorage(), fs, &git.CloneOptions{URL: c.Options.URL, Tags: git.NoTags, NoCheckout: fs == nil})
+	r, err := git.CloneContext(ctx, memory.NewStorage(), fs, &git.CloneOptions{
+		URL: c.Options.URL, Auth: c.Options.Auth, Tags: git.NoTags, NoCheckout: fs == nil,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("cloning repo: %w", err)
 	}
