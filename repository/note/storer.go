@@ -19,8 +19,10 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/filemode"
 	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v5/plumbing/transport"
 	"github.com/go-git/go-git/v5/storage/memory"
 	"github.com/policylabs/attestation"
+	"github.com/sirupsen/logrus"
 
 	"github.com/policylabs/collector/repository"
 )
@@ -59,16 +61,101 @@ func (c *Collector) Store(ctx context.Context, opts attestation.StoreOptions, en
 		return fmt.Errorf("opening repository: %w", err)
 	}
 
+	// A clone is this call's own copy of the remote: a rejected push can be
+	// tried again on what the remote has by then. A local repository is the
+	// caller's, and its notes are not ours to reset.
+	isClone := components.Transport != vcslocator.TransportFile
+	return c.storeInRepo(ctx, repo, components.Commit, envelopes, shouldPush, isClone)
+}
+
+// maxPushAttempts is how many times a note is pushed before giving up.
+const maxPushAttempts = 3
+
+// pushRetryDelay is waited before the second push, and twice that before
+// the third. A variable so tests do not wait.
+var pushRetryDelay = time.Second
+
+// storeInRepo writes the envelopes to the commit's note in repo and, when
+// asked, pushes the notes ref.
+//
+// A push is rejected when the remote's notes moved after they were read:
+// every note of a repository lives under the one ref, so two writers, or one
+// writer storing two notes in a row, race for it. With retry, a rejected
+// push is tried again from the start: the remote's notes are fetched as they
+// are now, the note is written on top of them, and that is pushed. Nothing
+// already in the notes is lost, and the envelopes are written once.
+func (c *Collector) storeInRepo(
+	ctx context.Context, repo *git.Repository, commit string,
+	envelopes []attestation.Envelope, push, retry bool,
+) error {
+	for attempt := 1; ; attempt++ {
+		serr, err := c.writeNote(repo, commit, envelopes)
+		if err != nil {
+			return err
+		}
+		if !push {
+			return serr.ErrorOrNil()
+		}
+
+		err = c.pushNotes(ctx, repo)
+		if err == nil {
+			return serr.ErrorOrNil()
+		}
+		if !retry || attempt >= maxPushAttempts || !retryablePush(ctx, err) {
+			return fmt.Errorf("pushing notes: %w", err)
+		}
+		logrus.Debugf("note: push %d of %d for commit %s was rejected, trying again: %v",
+			attempt, maxPushAttempts, commit, err)
+
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("pushing notes: %w", ctx.Err())
+		case <-time.After(time.Duration(attempt) * pushRetryDelay):
+		}
+		if err := c.resetNotesToRemote(ctx, repo); err != nil {
+			return fmt.Errorf("pushing notes: reading the remote's notes after a rejected push: %w", err)
+		}
+	}
+}
+
+// retryablePush reports whether a failed push is worth another attempt. A
+// push that failed for lack of access will fail again, and so will any
+// under a context that is done; the rest (the ref moved, the remote could
+// not take the pack, the connection dropped) may well not.
+func retryablePush(ctx context.Context, err error) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	for _, permanent := range []error{
+		transport.ErrAuthenticationRequired,
+		transport.ErrAuthorizationFailed,
+		transport.ErrRepositoryNotFound,
+		transport.ErrInvalidAuthMethod,
+	} {
+		if errors.Is(err, permanent) {
+			return false
+		}
+	}
+	return true
+}
+
+// writeNote adds the envelopes to the commit's note in the repository's
+// notes ref, on top of whatever the ref holds. The envelopes that could not
+// be serialized are reported in the returned StoreError, which is nil when
+// there were none.
+func (c *Collector) writeNote(
+	repo *git.Repository, commit string, envelopes []attestation.Envelope,
+) (*repository.StoreError, error) {
 	// Read existing bundle if it exists
-	existingData, notePath, isSharded, err := c.readExistingBundle(repo, components.Commit)
+	existingData, notePath, isSharded, err := c.readExistingBundle(repo, commit)
 	if err != nil {
-		return fmt.Errorf("reading existing bundle: %w", err)
+		return nil, fmt.Errorf("reading existing bundle: %w", err)
 	}
 
 	// Validate existing data is JSONL if present
 	if len(existingData) > 0 {
 		if err := c.validateJSONL(existingData); err != nil {
-			return fmt.Errorf("existing note data is not valid JSONL: %w", err)
+			return nil, fmt.Errorf("existing note data is not valid JSONL: %w", err)
 		}
 	}
 
@@ -76,7 +163,7 @@ func (c *Collector) Store(ctx context.Context, opts attestation.StoreOptions, en
 	// serialized are skipped and reported once the rest is written.
 	newJSONL, serr := c.serializeToJSONL(envelopes)
 	if len(envelopes) > 0 && serr.AllFailed() {
-		return serr
+		return nil, serr
 	}
 
 	// Append new JSONL to existing data
@@ -92,22 +179,47 @@ func (c *Collector) Store(ctx context.Context, opts attestation.StoreOptions, en
 	finalPath := notePath
 	if shouldShard && !isSharded {
 		// Transition from non-sharded to sharded
-		finalPath = components.Commit[0:2] + "/" + components.Commit[2:]
+		finalPath = commit[0:2] + "/" + commit[2:]
 	}
 
 	// Update the notes ref with the new data
-	if err := c.updateNotesRef(repo, finalPath, jsonlData, components.Commit); err != nil {
-		return fmt.Errorf("updating notes ref: %w", err)
+	if err := c.updateNotesRef(repo, finalPath, jsonlData, commit); err != nil {
+		return nil, fmt.Errorf("updating notes ref: %w", err)
 	}
+	return serr, nil
+}
 
-	// Push if needed
-	if shouldPush {
-		if err := c.pushNotes(ctx, repo); err != nil {
-			return fmt.Errorf("pushing notes: %w", err)
+// resetNotesToRemote makes the local notes ref the remote's again, dropping
+// the commit a rejected push left on it. When the remote has no notes, the
+// local ref is removed, so the next write starts them.
+func (c *Collector) resetNotesToRemote(ctx context.Context, repo *git.Repository) error {
+	auth, err := vcslocator.GetAuthMethod(
+		c.Options.Locator, vcslocator.WithHttpAuth(c.Options.HttpUsername, c.Options.HttpPassword),
+	)
+	if err != nil {
+		return fmt.Errorf("getting auth method: %w", err)
+	}
+	err = repo.FetchContext(ctx, &git.FetchOptions{
+		Auth:  auth,
+		Force: true,
+		RefSpecs: []config.RefSpec{
+			config.RefSpec(fmt.Sprintf("+%s:%s", notesRef, notesRef)),
+		},
+	})
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, git.NoMatchingRefSpecError{}):
+		if err := repo.Storer.RemoveReference(plumbing.ReferenceName(notesRef)); err != nil {
+			return fmt.Errorf("removing the local notes ref: %w", err)
 		}
+		return nil
+	case errors.Is(err, git.NoErrAlreadyUpToDate):
+		// The local ref already is the remote's.
+		return nil
+	default:
+		return fmt.Errorf("fetching notes: %w", err)
 	}
-
-	return serr.ErrorOrNil()
 }
 
 // openOrCloneRepoForNotes opens an existing repository or clones it for notes operations
