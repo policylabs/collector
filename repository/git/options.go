@@ -12,6 +12,8 @@ import (
 	"strings"
 
 	"github.com/carabiner-dev/vcslocator"
+	"github.com/go-git/go-git/v5/plumbing/transport"
+	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
 )
 
 type optFn = func(*Options) error
@@ -25,6 +27,11 @@ type Options struct {
 	// Extensions are the file extensions read from the cloned repository.
 	// When nil, the filesystem collector's defaults are used.
 	Extensions []string
+
+	// Auth authenticates every request to the remote: resolving the ref,
+	// cloning it and fetching the commits a subject query asks about. Nil
+	// reads anonymously, which is all a public repository needs.
+	Auth transport.AuthMethod
 }
 
 var defaultOptions = Options{}
@@ -79,6 +86,30 @@ func isLocalPath(s string) bool {
 func WithPath(path string) optFn {
 	return func(opts *Options) error {
 		opts.Path = path
+		return nil
+	}
+}
+
+// WithAuth authenticates the requests to the remote with a go-git transport
+// auth method, which is what reading a private repository takes. An init
+// string cannot carry credentials, so a caller that holds them builds the
+// collector with New and this option.
+func WithAuth(auth transport.AuthMethod) optFn {
+	return func(opts *Options) error {
+		opts.Auth = auth
+		return nil
+	}
+}
+
+// WithToken authenticates the requests to the remote with a bearer or
+// installation token, using GitHub's "x-access-token" basic-auth
+// convention, as the gitsign collector does. An empty token leaves the
+// collector reading anonymously.
+func WithToken(token string) optFn {
+	return func(opts *Options) error {
+		if token != "" {
+			opts.Auth = &githttp.BasicAuth{Username: "x-access-token", Password: token}
+		}
 		return nil
 	}
 }

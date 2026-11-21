@@ -5,14 +5,19 @@ package git
 
 import (
 	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
+	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
 	intoto "github.com/in-toto/attestation/go/v1"
 	"github.com/policylabs/attestation"
 	"github.com/sirupsen/logrus"
@@ -272,4 +277,86 @@ func TestFetchBySubjectDescribesOtherCommits(t *testing.T) {
 	require.Len(t, query(parent.String()), 1, "the described commit is remembered")
 	require.Empty(t, query("ffffffffffffffffffffffffffffffffffffffff"))
 	require.Len(t, query(head.String()), 1, "the checked-out commit is still served from the clone")
+}
+
+// The credentials go out with every request to the remote, whichever way
+// the locator makes the collector reach it: resolving a short ref, cloning
+// a full one, fetching a commit by sha, and fetching another commit for a
+// subject query. The remote here answers nothing useful: what it saw is
+// what the test is about.
+func TestAuthIsSentToTheRemote(t *testing.T) {
+	t.Parallel()
+	const sha = "26c86b565d84be21e02361ba939bbcbf19e39e33"
+	for _, tc := range []struct {
+		name string
+		ref  string
+	}{
+		{name: "short ref, resolved on the remote", ref: "v1.0.0"},
+		{name: "full ref, cloned", ref: "refs/tags/v1.0.0"},
+		{name: "commit, fetched by sha", ref: sha},
+		{name: "no ref, the remote's HEAD", ref: ""},
+	} {
+		for _, token := range []string{"s3cret", ""} {
+			t.Run(fmt.Sprintf("%s, token %q", tc.name, token), func(t *testing.T) {
+				t.Parallel()
+				var mu sync.Mutex
+				var requests, authed int
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					mu.Lock()
+					defer mu.Unlock()
+					requests++
+					if user, pass, ok := r.BasicAuth(); ok && user == "x-access-token" && pass == "s3cret" {
+						authed++
+					}
+					http.Error(w, "nothing here", http.StatusNotFound)
+				}))
+				t.Cleanup(srv.Close)
+
+				c, err := New(WithToken(token), func(o *Options) error {
+					o.URL, o.Ref = srv.URL+"/org/repo", tc.ref
+					return nil
+				})
+				require.NoError(t, err)
+				_, err = c.Fetch(t.Context(), attestation.FetchOptions{})
+				require.Error(t, err, "the remote serves no repository")
+
+				mu.Lock()
+				defer mu.Unlock()
+				require.Positive(t, requests, "the remote was never asked")
+				if token == "" {
+					require.Zero(t, authed, "credentials sent without a token")
+					require.Nil(t, c.Options.Auth)
+				} else {
+					require.Equal(t, requests, authed, "a request went out without the credentials")
+				}
+			})
+		}
+	}
+
+	// A commit fetched on demand for a subject query takes them too.
+	t.Run("commit described for a subject query", func(t *testing.T) {
+		t.Parallel()
+		var mu sync.Mutex
+		var requests, authed int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			defer mu.Unlock()
+			requests++
+			if _, pass, ok := r.BasicAuth(); ok && pass == "s3cret" {
+				authed++
+			}
+			http.Error(w, "nothing here", http.StatusNotFound)
+		}))
+		t.Cleanup(srv.Close)
+
+		c, err := New(WithAuth(&githttp.BasicAuth{Username: "x-access-token", Password: "s3cret"}))
+		require.NoError(t, err)
+		c.Options.URL = srv.URL + "/org/repo"
+		require.Nil(t, c.describeCommit(t.Context(), sha))
+
+		mu.Lock()
+		defer mu.Unlock()
+		require.Positive(t, requests)
+		require.Equal(t, requests, authed)
+	})
 }
