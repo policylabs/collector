@@ -36,28 +36,40 @@ var (
 
 type RepositoryFactory func(string) (attestation.Repository, error)
 
-var mtx sync.Mutex
+// mtx guards repositoryTypes. The registry is read on every repository built
+// from an init string and written when types are registered, which a
+// program may do while it is already serving: both take the lock.
+var mtx sync.RWMutex
 
+// RepositoryFromString builds the repository an init string names: the type
+// before the first colon, handed what follows it.
 func RepositoryFromString(init string) (attestation.Repository, error) {
 	t, init, _ := strings.Cut(init, ":")
-	if b, ok := repositoryTypes[t]; ok {
-		return b(init)
+	mtx.RLock()
+	build, ok := repositoryTypes[t]
+	mtx.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("repository type unknown: %q", t)
 	}
-	return nil, fmt.Errorf("repository type unknown: %q", t)
+	// The factory runs outside the lock: it may be slow, and it may build
+	// repositories of other types itself.
+	return build(init)
 }
 
-// RegisterCollectorType registers a new type of collector
+// RegisterCollectorType registers a new type of collector. A moniker that
+// is already registered keeps its factory, and the call answers
+// ErrTypeAlreadyRegistered.
 func RegisterCollectorType(moniker string, factory RepositoryFactory) error {
+	mtx.Lock()
+	defer mtx.Unlock()
 	if _, ok := repositoryTypes[moniker]; ok {
 		return ErrTypeAlreadyRegistered
 	}
-	mtx.Lock()
 	repositoryTypes[moniker] = factory
-	mtx.Unlock()
 	return nil
 }
 
-// RegisterCollectorType registers a new type of collector
+// UnregisterCollectorType removes a type of collector from the registry.
 func UnregisterCollectorType(moniker string) {
 	mtx.Lock()
 	delete(repositoryTypes, moniker)
