@@ -396,3 +396,95 @@ func TestFetchWithNonexistentTag(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, envs)
 }
+
+// A commit's subject is named after the commit, not only its repository,
+// and located with a VCS locator other tools resolve.
+func TestNameCommit(t *testing.T) {
+	t.Parallel()
+	const sha = "26c86b565d84be21e02361ba939bbcbf19e39e33"
+	for _, tc := range []struct {
+		name     string
+		remote   string
+		digest   map[string]string
+		wantName string
+		wantURI  string
+	}{
+		{
+			name:     "https remote",
+			remote:   "https://github.com/policylabs/collector",
+			wantName: "https://github.com/policylabs/collector@" + sha,
+			wantURI:  "git+https://github.com/policylabs/collector@" + sha,
+		},
+		{
+			name:     "the .git suffix is not part of a locator",
+			remote:   "https://github.com/policylabs/collector.git",
+			wantName: "https://github.com/policylabs/collector.git@" + sha,
+			wantURI:  "git+https://github.com/policylabs/collector@" + sha,
+		},
+		{
+			name:     "credentials in the remote are dropped",
+			remote:   "https://x-access-token:" + "s3cret" + "@github.com/policylabs/collector",
+			wantName: "https://github.com/policylabs/collector@" + sha,
+			wantURI:  "git+https://github.com/policylabs/collector@" + sha,
+		},
+		{
+			name:     "a port is kept",
+			remote:   "https://git.example.com:8443/org/repo",
+			wantName: "https://git.example.com:8443/org/repo@" + sha,
+			wantURI:  "git+https://git.example.com:8443/org/repo@" + sha,
+		},
+		{
+			name:     "plain http is located over https",
+			remote:   "http://git.example.com/org/repo",
+			wantName: "http://git.example.com/org/repo@" + sha,
+			wantURI:  "git+https://git.example.com/org/repo@" + sha,
+		},
+		{
+			name:     "ssh url",
+			remote:   "ssh://git@github.com/policylabs/collector.git",
+			wantName: "ssh://github.com/policylabs/collector.git@" + sha,
+			wantURI:  "git+ssh://github.com/policylabs/collector@" + sha,
+		},
+		{
+			name:     "scp-like remote",
+			remote:   "git@github.com:policylabs/collector.git",
+			wantName: "git@github.com:policylabs/collector.git@" + sha,
+			wantURI:  "git+ssh://github.com/policylabs/collector@" + sha,
+		},
+		{
+			name:     "local path",
+			remote:   "/srv/git/collector",
+			wantName: "/srv/git/collector@" + sha,
+			wantURI:  "file:///srv/git/collector@" + sha,
+		},
+		{
+			name:     "the digest may be under gitCommit only",
+			remote:   "https://github.com/policylabs/collector",
+			digest:   map[string]string{"gitCommit": sha},
+			wantName: "https://github.com/policylabs/collector@" + sha,
+			wantURI:  "git+https://github.com/policylabs/collector@" + sha,
+		},
+		{
+			// No remote: nothing to locate the commit by.
+			name: "no remote",
+		},
+		{
+			name:     "no digest",
+			remote:   "https://github.com/policylabs/collector",
+			digest:   map[string]string{},
+			wantName: "https://github.com/policylabs/collector",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			digest := tc.digest
+			if digest == nil {
+				digest = map[string]string{algoSHA1: sha}
+			}
+			subject := &intoto.ResourceDescriptor{Name: tc.remote, Digest: digest}
+			nameCommit(subject)
+			require.Equal(t, tc.wantName, subject.GetName())
+			require.Equal(t, tc.wantURI, subject.GetUri())
+		})
+	}
+}

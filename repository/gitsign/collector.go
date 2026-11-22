@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	neturl "net/url"
 	"strings"
 
 	"github.com/carabiner-dev/vcslocator"
@@ -443,7 +444,8 @@ func (c *Collector) buildVirtualAttestation(ctx context.Context, repo *gogit.Rep
 	}
 
 	// Enrich subjects: ensure both sha1 and gitCommit digests are present
-	// so the attestation matches queries using either algorithm.
+	// so the attestation matches queries using either algorithm, and name
+	// the commit, not only the repository it is in.
 	subjects := make([]*intoto.ResourceDescriptor, 0, len(stmt.GetSubject()))
 	for _, s := range stmt.GetSubject() {
 		digests := s.GetDigest()
@@ -457,6 +459,7 @@ func (c *Collector) buildVirtualAttestation(ctx context.Context, repo *gogit.Rep
 				digests[intoto.AlgorithmSHA1.String()] = v
 			}
 		}
+		nameCommit(s)
 		subjects = append(subjects, s)
 	}
 
@@ -466,6 +469,56 @@ func (c *Collector) buildVirtualAttestation(ctx context.Context, repo *gogit.Rep
 	)
 
 	return &virtualEnvelope{statement: stmtObj}, nil
+}
+
+// nameCommit names a commit subject after the commit and locates it. gitsign
+// names the subject with the URL of the repository's remote, which is the
+// same for every commit of the repository; the digests alone say which one.
+//
+// The name becomes "<remote>@<sha>", and the uri the commit's VCS locator
+// (git+https://host/org/repo@<sha>), which other tools resolve as it stands,
+// built from the subject's own sha1 digest.
+// A subject without a name, a repository with no such remote, is left as it
+// is: there is nothing to locate it by. Credentials in a remote's URL are
+// dropped from both.
+func nameCommit(subject *intoto.ResourceDescriptor) {
+	// The full digest, as the subject carries it, whatever the locator the
+	// commit was asked for with.
+	sha := subject.GetDigest()[intoto.AlgorithmSHA1.String()]
+	if sha == "" {
+		sha = subject.GetDigest()[intoto.AlgorithmGitCommit.String()]
+	}
+	remote := subject.GetName()
+	if remote == "" || sha == "" {
+		return
+	}
+	// A scp-like remote, git@host:org/repo.git, is not a URL.
+	if !strings.Contains(remote, "://") {
+		if userHost, path, ok := strings.Cut(remote, ":"); ok && strings.Contains(userHost, "@") && !strings.Contains(userHost, "/") {
+			_, host, _ := strings.Cut(userHost, "@")
+			subject.Name = remote + "@" + sha
+			subject.Uri = "git+ssh://" + host + "/" + strings.TrimSuffix(strings.TrimPrefix(path, "/"), ".git") + "@" + sha
+			return
+		}
+	}
+	u, err := neturl.Parse(remote)
+	if err != nil {
+		subject.Name = remote + "@" + sha
+		return
+	}
+	u.User = nil
+	subject.Name = u.String() + "@" + sha
+	path := strings.TrimSuffix(strings.TrimPrefix(u.Path, "/"), ".git")
+	// The schemes a VCS locator has, spelled as the locator library
+	// spells them: plain http is located over https.
+	switch u.Scheme {
+	case "https", "http":
+		subject.Uri = "git+https://" + u.Host + "/" + path + "@" + sha
+	case "ssh":
+		subject.Uri = "git+ssh://" + u.Host + "/" + path + "@" + sha
+	case "file", "":
+		subject.Uri = "file://" + u.Path + "@" + sha
+	}
 }
 
 // buildVirtualTagAttestation generates a tag predicate for an annotated tag
