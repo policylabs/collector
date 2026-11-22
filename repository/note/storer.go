@@ -489,80 +489,90 @@ func (c *Collector) createUpdatedTree(repo *git.Repository, baseTree *object.Tre
 		return plumbing.ZeroHash, fmt.Errorf("storing blob: %w", err)
 	}
 
-	// Build the tree entries
-	entries := []object.TreeEntry{}
-
-	// If we have a base tree, copy existing entries (excluding the one we're updating)
-	if baseTree != nil {
-		for _, entry := range baseTree.Entries {
-			if entry.Name != notePath && !strings.HasPrefix(entry.Name+"/", notePath+"/") {
-				entries = append(entries, entry)
+	// A sharded note ("ab/cdef...") lives in a subtree of the notes tree,
+	// next to the other notes whose commits share the first two digits. The
+	// subtree is the one already there with this note set in it, not a new
+	// one holding this note alone: a second entry of the same name is a
+	// tree a server refuses, and replacing the first would drop the notes
+	// of every other commit under it.
+	if dirName, fileName, sharded := strings.Cut(notePath, "/"); sharded {
+		var subEntries []object.TreeEntry
+		if baseTree != nil {
+			for i := range baseTree.Entries {
+				if baseTree.Entries[i].Name != dirName {
+					continue
+				}
+				if baseTree.Entries[i].Mode != filemode.Dir {
+					return plumbing.ZeroHash, fmt.Errorf("notes tree has %q as a file, not a directory of notes", dirName)
+				}
+				subTree, err := repo.TreeObject(baseTree.Entries[i].Hash)
+				if err != nil {
+					return plumbing.ZeroHash, fmt.Errorf("reading notes subtree %q: %w", dirName, err)
+				}
+				subEntries = subTree.Entries
 			}
 		}
-	}
-
-	// Handle sharded paths (e.g., "ab/cdef...")
-	if strings.Contains(notePath, "/") {
-		// Create subtree for sharded notes
-		parts := strings.SplitN(notePath, "/", 2)
-		dirName := parts[0]
-		fileName := parts[1]
-
-		// Create subtree with the file
-		subTree := &object.Tree{
-			Entries: []object.TreeEntry{
-				{
-					Name: fileName,
-					Mode: filemode.Regular,
-					Hash: blobHash,
-				},
-			},
-		}
-
-		subTreeObj := repo.Storer.NewEncodedObject()
-		if err := subTree.Encode(subTreeObj); err != nil {
-			return plumbing.ZeroHash, fmt.Errorf("encoding subtree: %w", err)
-		}
-		subTreeHash, err := repo.Storer.SetEncodedObject(subTreeObj)
+		subTreeHash, err := writeTree(repo, setEntry(subEntries, object.TreeEntry{
+			Name: fileName, Mode: filemode.Regular, Hash: blobHash,
+		}))
 		if err != nil {
 			return plumbing.ZeroHash, fmt.Errorf("storing subtree: %w", err)
 		}
-
-		// Add directory entry
-		entries = append(entries, object.TreeEntry{
-			Name: dirName,
-			Mode: filemode.Dir,
-			Hash: subTreeHash,
-		})
-	} else {
-		// Add file entry at root
-		entries = append(entries, object.TreeEntry{
-			Name: notePath,
-			Mode: filemode.Regular,
-			Hash: blobHash,
-		})
+		return writeTree(repo, setEntry(rootEntries(baseTree, notePath), object.TreeEntry{
+			Name: dirName, Mode: filemode.Dir, Hash: subTreeHash,
+		}))
 	}
 
-	// Sort entries by name (required by git)
-	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].Name < entries[j].Name
-	})
+	// A note at the root of the notes tree.
+	return writeTree(repo, setEntry(rootEntries(baseTree, notePath), object.TreeEntry{
+		Name: notePath, Mode: filemode.Regular, Hash: blobHash,
+	}))
+}
 
-	// Create the root tree
-	tree := &object.Tree{
-		Entries: entries,
+// rootEntries returns the entries of the notes tree a note at notePath is
+// written into. A note that moves into a subtree leaves its file at the
+// root behind: that entry, named by the whole commit sha, is left out.
+func rootEntries(baseTree *object.Tree, notePath string) []object.TreeEntry {
+	if baseTree == nil {
+		return nil
 	}
+	unsharded := strings.ReplaceAll(notePath, "/", "")
+	entries := make([]object.TreeEntry, 0, len(baseTree.Entries)+1)
+	for i := range baseTree.Entries {
+		if notePath != unsharded && baseTree.Entries[i].Name == unsharded {
+			continue
+		}
+		entries = append(entries, baseTree.Entries[i])
+	}
+	return entries
+}
 
-	treeObj := repo.Storer.NewEncodedObject()
-	if err := tree.Encode(treeObj); err != nil {
+// setEntry returns entries with entry in them once: in place of the entry
+// of the same name when there is one, added otherwise. The slice given is
+// not changed.
+func setEntry(entries []object.TreeEntry, entry object.TreeEntry) []object.TreeEntry {
+	out := make([]object.TreeEntry, 0, len(entries)+1)
+	for i := range entries {
+		if entries[i].Name != entry.Name {
+			out = append(out, entries[i])
+		}
+	}
+	return append(out, entry)
+}
+
+// writeTree stores a tree with the entries, in the order git requires of a
+// tree, and returns its hash.
+func writeTree(repo *git.Repository, entries []object.TreeEntry) (plumbing.Hash, error) {
+	sort.Sort(object.TreeEntrySorter(entries))
+	obj := repo.Storer.NewEncodedObject()
+	if err := (&object.Tree{Entries: entries}).Encode(obj); err != nil {
 		return plumbing.ZeroHash, fmt.Errorf("encoding tree: %w", err)
 	}
-	treeHash, err := repo.Storer.SetEncodedObject(treeObj)
+	hash, err := repo.Storer.SetEncodedObject(obj)
 	if err != nil {
 		return plumbing.ZeroHash, fmt.Errorf("storing tree: %w", err)
 	}
-
-	return treeHash, nil
+	return hash, nil
 }
 
 // pushNotes pushes the notes ref to the remote
