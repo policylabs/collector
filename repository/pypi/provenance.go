@@ -5,6 +5,7 @@ package pypi
 
 import (
 	"bytes"
+	"context"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -27,6 +28,7 @@ import (
 
 	"github.com/policylabs/collector/envelope/bundle"
 	"github.com/policylabs/collector/predicate/generic"
+	"github.com/policylabs/collector/repository"
 	"github.com/policylabs/collector/statement/intoto"
 )
 
@@ -145,6 +147,13 @@ func ParseProvenance(data []byte) (*Provenance, error) {
 // Envelopes converts every attestation of every bundle in the provenance
 // object into an envelope for the given distribution file.
 func (p *Provenance) Envelopes(dist *Distribution) ([]attestation.Envelope, error) {
+	return p.envelopes(dist, false)
+}
+
+// envelopes builds the envelopes of the provenance object. When keep is set
+// each one keeps, in the origin of its predicate, what it takes to read it
+// back (see keepBundle).
+func (p *Provenance) envelopes(dist *Distribution, keep bool) ([]attestation.Envelope, error) {
 	var ret []attestation.Envelope
 	for i := range p.AttestationBundles {
 		b := &p.AttestationBundles[i]
@@ -152,6 +161,11 @@ func (p *Provenance) Envelopes(dist *Distribution) ([]attestation.Envelope, erro
 			env, err := buildEnvelope(b.Publisher, &b.Attestations[j], dist)
 			if err != nil {
 				return nil, fmt.Errorf("bundle %d attestation %d: %w", i, j, err)
+			}
+			if keep {
+				if err := keepBundle(env, b.Publisher, dist); err != nil {
+					return nil, fmt.Errorf("keeping bundle %d attestation %d: %w", i, j, err)
+				}
 			}
 			ret = append(ret, env)
 		}
@@ -243,6 +257,13 @@ func buildEnvelope(publisher json.RawMessage, att *Attestation, dist *Distributi
 	return env, nil
 }
 
+// Keys of the reassembly material recorded with the bundle of a synthesized
+// statement: what the synthesis reads that is not in the bundle.
+const (
+	materialPublisher    = "publisher"
+	materialDistribution = "distribution"
+)
+
 // keepBundle records the sigstore bundle an attestation was reassembled into
 // as the origin of its predicate, with the serialized bundle as its content.
 //
@@ -251,9 +272,15 @@ func buildEnvelope(publisher json.RawMessage, att *Attestation, dist *Distributi
 // bundle as this collector serializes it and the digest of the origin is the
 // digest of that serialization, not of anything the index served. It carries
 // the signed statement, the certificate and the log entries, so it verifies
-// on its own. When the statement was synthesized, the content holds the
-// statement that was signed, not the synthesized one.
-func keepBundle(env attestation.Envelope, dist *Distribution) error {
+// on its own.
+//
+// When the statement is served as it was signed the bundle is the
+// attestation, and it is typed as one. When it was synthesized, parsing the
+// bundle gives the statement that was signed and not the one served, so it
+// gets no media type: the origin names this repository type instead, with
+// the publisher and the distribution the synthesis reads, and Reassemble
+// builds the attestation again from them.
+func keepBundle(env attestation.Envelope, publisher json.RawMessage, dist *Distribution) error {
 	b, ok := env.(*bundle.Envelope)
 	if !ok {
 		return fmt.Errorf("envelope is not a sigstore bundle (%T)", env)
@@ -275,20 +302,117 @@ func keepBundle(env attestation.Envelope, dist *Distribution) error {
 	origin.Uri = dist.purl()
 	origin.Content = data
 
-	// The bundle is the attestation only when the statement is served as it
-	// was signed. A synthesized statement cannot be parsed back out of the
-	// bundle, so its content is left without a media type: reading it back
-	// means running the synthesis again.
-	signed := &gointoto.Statement{}
-	if err := protojson.Unmarshal(b.GetDsseEnvelope().GetPayload(), signed); err != nil {
-		return fmt.Errorf("decoding signed statement: %w", err)
+	signed, err := signedStatement(b)
+	if err != nil {
+		return err
 	}
-	if signed.GetPredicate() != nil && len(signed.GetPredicate().GetFields()) > 0 {
+	if hasPredicate(signed) {
 		origin.MediaType = b.GetMediaType()
+	} else {
+		material, err := reassemblyMaterial(publisher, dist)
+		if err != nil {
+			return err
+		}
+		if err := repository.Annotate(origin, TypeMoniker, material); err != nil {
+			return err
+		}
 	}
 
 	pred.SetOrigin(origin)
 	return nil
+}
+
+// signedStatement decodes the statement a bundle carries, as it was signed.
+func signedStatement(b *bundle.Envelope) (*gointoto.Statement, error) {
+	signed := &gointoto.Statement{}
+	if err := protojson.Unmarshal(b.GetDsseEnvelope().GetPayload(), signed); err != nil {
+		return nil, fmt.Errorf("decoding signed statement: %w", err)
+	}
+	return signed, nil
+}
+
+// hasPredicate reports if a signed statement has a predicate of its own. The
+// ones that do not are served with a synthesized one.
+func hasPredicate(signed *gointoto.Statement) bool {
+	return signed.GetPredicate() != nil && len(signed.GetPredicate().GetFields()) > 0
+}
+
+// reassemblyMaterial encodes the publisher and the distribution of an
+// attestation as the plain values an origin's annotations hold.
+func reassemblyMaterial(publisher json.RawMessage, dist *Distribution) (map[string]any, error) {
+	material := map[string]any{}
+	if len(publisher) > 0 {
+		var p any
+		if err := json.Unmarshal(publisher, &p); err != nil {
+			return nil, fmt.Errorf("decoding publisher: %w", err)
+		}
+		material[materialPublisher] = p
+	}
+	data, err := json.Marshal(dist)
+	if err != nil {
+		return nil, fmt.Errorf("encoding distribution: %w", err)
+	}
+	var d any
+	if err := json.Unmarshal(data, &d); err != nil {
+		return nil, fmt.Errorf("encoding distribution: %w", err)
+	}
+	material[materialDistribution] = d
+	return material, nil
+}
+
+// Reassemble rebuilds the attestation kept in an origin by this repository
+// type: a sigstore bundle whose statement was synthesized. The bundle is
+// read from the content, and the statement is synthesized again from it and
+// from the publisher and the distribution recorded as reassembly material.
+// The envelope verifies as it did when first read: over the signed payload.
+func Reassemble(_ context.Context, origin *gointoto.ResourceDescriptor) ([]attestation.Envelope, error) {
+	env := &bundle.Envelope{}
+	if err := protojson.Unmarshal(origin.GetContent(), &env.Bundle); err != nil {
+		return nil, fmt.Errorf("decoding kept bundle: %w", err)
+	}
+	signed, err := signedStatement(env)
+	if err != nil {
+		return nil, err
+	}
+	// Nothing to synthesize: the bundle is the attestation
+	if hasPredicate(signed) {
+		return []attestation.Envelope{env}, nil
+	}
+
+	material := repository.Material(origin)
+	if material == nil {
+		return nil, errors.New("origin has no reassembly material")
+	}
+	dist := &Distribution{}
+	data, err := json.Marshal(material[materialDistribution])
+	if err != nil {
+		return nil, fmt.Errorf("reading distribution: %w", err)
+	}
+	if err := json.Unmarshal(data, dist); err != nil {
+		return nil, fmt.Errorf("reading distribution: %w", err)
+	}
+	if dist.Filename == "" {
+		return nil, errors.New("reassembly material names no distribution file")
+	}
+	var publisher json.RawMessage
+	if p, ok := material[materialPublisher]; ok {
+		if publisher, err = json.Marshal(p); err != nil {
+			return nil, fmt.Errorf("reading publisher: %w", err)
+		}
+	}
+
+	certDER := env.GetVerificationMaterial().GetCertificate().GetRawBytes()
+	entries := env.GetVerificationMaterial().GetTlogEntries()
+	if len(certDER) == 0 || len(entries) == 0 {
+		return nil, errors.New("kept bundle has no certificate or transparency log entry")
+	}
+
+	stmt, err := synthesizeStatement(signed, publisher, certDER, entries[0], dist)
+	if err != nil {
+		return nil, err
+	}
+	env.Statement = stmt
+	return []attestation.Envelope{env}, nil
 }
 
 // synthesizeStatement builds the statement served in place of a signed

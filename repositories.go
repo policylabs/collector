@@ -11,6 +11,7 @@ import (
 
 	"github.com/policylabs/attestation"
 
+	"github.com/policylabs/collector/repository"
 	"github.com/policylabs/collector/repository/actions"
 	"github.com/policylabs/collector/repository/coci"
 	"github.com/policylabs/collector/repository/filesystem"
@@ -101,6 +102,16 @@ func LoadDefaultRepositoryTypes() error {
 		stash.TypeMoniker:       stash.Build,
 	} {
 		if err := RegisterCollectorType(t, factory); err != nil {
+			if !errors.Is(err, ErrTypeAlreadyRegistered) {
+				errs = append(errs, err)
+			}
+		}
+	}
+	// The repository types that keep content only they can read back
+	for t, reassembler := range map[string]repository.Reassembler{
+		pypi.TypeMoniker: pypi.Reassemble,
+	} {
+		if err := RegisterReassembler(t, reassembler); err != nil {
 			if !errors.Is(err, ErrTypeAlreadyRegistered) {
 				errs = append(errs, err)
 			}
