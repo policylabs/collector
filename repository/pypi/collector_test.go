@@ -4,7 +4,9 @@
 package pypi
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -16,7 +18,11 @@ import (
 	gointoto "github.com/in-toto/attestation/go/v1"
 	"github.com/policylabs/attestation"
 	sapi "github.com/policylabs/signer/api/v1"
+	protobundle "github.com/sigstore/protobuf-specs/gen/pb-go/bundle/v1"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/encoding/protojson"
+
+	"github.com/policylabs/collector/envelope"
 )
 
 const (
@@ -362,4 +368,48 @@ func TestFetchVerify(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, string(payload), `"predicate":null`)
 	require.Equal(t, wheelSHA256, env.GetStatement().GetSubjects()[0].GetDigest()["sha256"])
+}
+
+// requireKeptContent checks that an attestation kept content that hashes to
+// the digest of its origin and returns it.
+func requireKeptContent(t *testing.T, env attestation.Envelope) []byte {
+	t.Helper()
+	content := envelope.OriginContent(env.GetPredicate())
+	require.NotEmpty(t, content)
+	sum := sha256.Sum256(content)
+	require.Equal(t, hex.EncodeToString(sum[:]), env.GetPredicate().GetOrigin().GetDigest()["sha256"])
+	return content
+}
+
+func TestFetchKeepContent(t *testing.T) {
+	t.Parallel()
+	srv := newTestIndex(t)
+	t.Cleanup(srv.Close)
+
+	c, err := New(WithPackageURL("pkg:pypi/sampleproject@4.0.0?file_name="+sdistName), WithIndexURL(srv.URL))
+	require.NoError(t, err)
+
+	envs, err := c.Fetch(t.Context(), attestation.FetchOptions{})
+	require.NoError(t, err)
+	require.Len(t, envs, 1)
+	require.Nil(t, envelope.OriginContent(envs[0].GetPredicate()), "content is not kept unless asked")
+
+	envs, err = c.Fetch(t.Context(), attestation.FetchOptions{KeepContent: true})
+	require.NoError(t, err)
+	require.Len(t, envs, 1)
+	content := requireKeptContent(t, envs[0])
+
+	origin := envs[0].GetPredicate().GetOrigin()
+	require.Equal(t, sdistName, origin.GetName())
+	require.Equal(t, "pkg:pypi/sampleproject@4.0.0?file_name="+sdistName, origin.GetUri())
+
+	// What is kept is a sigstore bundle carrying the statement as it was
+	// signed, with the material to verify it; not the synthesized statement.
+	kept := &protobundle.Bundle{}
+	require.NoError(t, protojson.Unmarshal(content, kept))
+	require.NotNil(t, kept.GetVerificationMaterial().GetCertificate())
+	require.NotEmpty(t, kept.GetVerificationMaterial().GetTlogEntries())
+	require.NotEmpty(t, kept.GetDsseEnvelope().GetSignatures())
+	require.NotContains(t, string(kept.GetDsseEnvelope().GetPayload()), ExtensionKey)
+	require.Contains(t, string(envs[0].GetPredicate().GetData()), ExtensionKey)
 }

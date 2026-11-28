@@ -6,6 +6,8 @@ package actions
 import (
 	"archive/zip"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -22,6 +24,7 @@ import (
 	"github.com/policylabs/attestation"
 	"github.com/stretchr/testify/require"
 
+	"github.com/policylabs/collector/envelope"
 	"github.com/policylabs/collector/filters"
 	"github.com/policylabs/collector/repository/filesystem"
 )
@@ -461,4 +464,34 @@ func TestDefaultExtensions(t *testing.T) {
 
 	_, err = New(WithRunURL("//github.com/example/repo/run/42"), WithExtensions())
 	require.ErrorContains(t, err, "no artifact extensions set")
+}
+
+// requireKeptContent checks that an attestation kept content that hashes to
+// the digest of its origin and returns it.
+func requireKeptContent(t *testing.T, env attestation.Envelope) []byte {
+	t.Helper()
+	content := envelope.OriginContent(env.GetPredicate())
+	require.NotEmpty(t, content)
+	sum := sha256.Sum256(content)
+	require.Equal(t, hex.EncodeToString(sum[:]), env.GetPredicate().GetOrigin().GetDigest()["sha256"])
+	return content
+}
+
+func TestFetchKeepContent(t *testing.T) {
+	t.Parallel()
+
+	atts, err := standardRun(t).collector(t).Fetch(t.Context(), attestation.FetchOptions{})
+	require.NoError(t, err)
+	for _, att := range atts {
+		require.Nil(t, envelope.OriginContent(att.GetPredicate()), "content is not kept unless asked")
+	}
+
+	// Every attestation read out of an artifact keeps its data, whether it
+	// came as a file, a line of a jsonl bundle or inside a nested archive.
+	atts, err = standardRun(t).collector(t).Fetch(t.Context(), attestation.FetchOptions{KeepContent: true})
+	require.NoError(t, err)
+	require.Len(t, atts, 6)
+	for _, att := range atts {
+		require.JSONEq(t, string(statement(t)), string(requireKeptContent(t, att)))
+	}
 }

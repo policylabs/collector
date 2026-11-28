@@ -4,7 +4,9 @@
 package sbomfs
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -17,6 +19,8 @@ import (
 	"github.com/protobom/protobom/pkg/sbom"
 	"github.com/protobom/protobom/pkg/writer"
 	"github.com/stretchr/testify/require"
+
+	"github.com/policylabs/collector/envelope"
 )
 
 // dsse is a minimal DSSE envelope for testing.
@@ -275,4 +279,36 @@ func TestSanitizePredicateType(t *testing.T) {
 		result := sanitizePredicateType(tc.input)
 		require.Equal(t, tc.expected, result, "sanitizePredicateType(%q)", tc.input)
 	}
+}
+
+// requireKeptContent checks that an attestation kept content that hashes to
+// the digest of its origin and returns it.
+func requireKeptContent(t *testing.T, env attestation.Envelope) []byte {
+	t.Helper()
+	content := envelope.OriginContent(env.GetPredicate())
+	require.NotEmpty(t, content)
+	sum := sha256.Sum256(content)
+	require.Equal(t, hex.EncodeToString(sum[:]), env.GetPredicate().GetOrigin().GetDigest()["sha256"])
+	return content
+}
+
+func TestFetchKeepContent(t *testing.T) {
+	t.Parallel()
+
+	att := testDSSE(t, "https://slsa.dev/provenance/v0.2")
+	path := writeSBOMWithAttestations(t, map[string][]byte{
+		"attestation-0000.json": att,
+	})
+	c, err := New(WithPath(path))
+	require.NoError(t, err)
+
+	envs, err := c.Fetch(t.Context(), attestation.FetchOptions{})
+	require.NoError(t, err)
+	require.Len(t, envs, 1)
+	require.Nil(t, envelope.OriginContent(envs[0].GetPredicate()), "content is not kept unless asked")
+
+	envs, err = c.Fetch(t.Context(), attestation.FetchOptions{KeepContent: true})
+	require.NoError(t, err)
+	require.Len(t, envs, 1)
+	require.Equal(t, att, requireKeptContent(t, envs[0]))
 }

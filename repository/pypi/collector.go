@@ -104,6 +104,13 @@ func (c *Collector) fetchForPurl(ctx context.Context, opts attestation.FetchOpti
 		if err != nil {
 			return nil, fmt.Errorf("reading provenance of %s: %w", dists[i].Filename, err)
 		}
+		if opts.KeepContent {
+			for _, env := range envs {
+				if err := keepBundle(env, &dists[i]); err != nil {
+					return nil, fmt.Errorf("keeping provenance of %s: %w", dists[i].Filename, err)
+				}
+			}
+		}
 		ret = append(ret, envs...)
 	}
 

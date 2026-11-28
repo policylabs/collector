@@ -4,13 +4,16 @@
 package pypi
 
 import (
+	"bytes"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"time"
 
+	"github.com/carabiner-dev/hasher"
 	gointoto "github.com/in-toto/attestation/go/v1"
 	gopurl "github.com/package-url/packageurl-go"
 	"github.com/policylabs/attestation"
@@ -238,6 +241,41 @@ func buildEnvelope(publisher json.RawMessage, att *Attestation, dist *Distributi
 	}
 	env.Statement = stmt
 	return env, nil
+}
+
+// keepBundle records the sigstore bundle an attestation was reassembled into
+// as the origin of its predicate, with the serialized bundle as its content.
+//
+// The index does not serve a document per attestation: the bundle is built
+// here from the fields of the provenance object, so what is kept is that
+// bundle as this collector serializes it and the digest of the origin is the
+// digest of that serialization, not of anything the index served. It carries
+// the signed statement, the certificate and the log entries, so it verifies
+// on its own. When the statement was synthesized, the content holds the
+// statement that was signed, not the synthesized one.
+func keepBundle(env attestation.Envelope, dist *Distribution) error {
+	b, ok := env.(*bundle.Envelope)
+	if !ok {
+		return fmt.Errorf("envelope is not a sigstore bundle (%T)", env)
+	}
+	pred := env.GetPredicate()
+	if pred == nil {
+		return errors.New("attestation has no predicate")
+	}
+	data, err := protojson.Marshal(&b.Bundle)
+	if err != nil {
+		return fmt.Errorf("serializing bundle: %w", err)
+	}
+	digests, err := hasher.New().HashReaders([]io.Reader{bytes.NewReader(data)})
+	if err != nil || len(*digests) == 0 {
+		return fmt.Errorf("hashing bundle: %w", err)
+	}
+	origin := digests.ToResourceDescriptors()[0]
+	origin.Name = dist.Filename
+	origin.Uri = dist.purl()
+	origin.Content = data
+	pred.SetOrigin(origin)
+	return nil
 }
 
 // synthesizeStatement builds the statement served in place of a signed

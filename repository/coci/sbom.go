@@ -131,6 +131,9 @@ func (c *Collector) getSBOMEnvelope(
 	}
 	origin := hset.ToResourceDescriptors()[0]
 	origin.Uri = "oci:" + sbomRef
+	if opts.KeepContent {
+		origin.Content = data
+	}
 	pred.SetOrigin(origin)
 
 	stmt := intoto.NewStatement(
