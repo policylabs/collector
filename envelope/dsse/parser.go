@@ -100,3 +100,11 @@ func (p *Parser) ParseStream(r io.Reader) ([]attestation.Envelope, error) {
 func (p *Parser) FileExtensions() []string {
 	return []string{"json", "intoto"}
 }
+
+// MediaType is the media type of a DSSE envelope.
+const MediaType = "application/vnd.dsse.envelope.v1+json"
+
+// ReadsMediaType reports if the parser reads data of a media type.
+func (p *Parser) ReadsMediaType(mediaType string) bool {
+	return mediaType == MediaType
+}

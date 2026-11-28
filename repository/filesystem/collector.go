@@ -207,9 +207,12 @@ func (c *Collector) Fetch(ctx context.Context, opts attestation.FetchOptions) ([
 		// Pass the read data to all the enabled parsers, except if the file
 		// is a jsonl bundle:
 		if strings.HasSuffix(path, ".jsonl") {
-			attestations, err = envelope.NewJSONL().Parse(bs)
+			attestations, err = (&envelope.JsonlParser{KeepContent: opts.KeepContent}).Parse(bs)
 		} else {
 			attestations, err = envelope.Parsers.Parse(bytes.NewReader(bs))
+			if err == nil && opts.KeepContent {
+				envelope.KeepContent(attestations, bs)
+			}
 		}
 		if err != nil {
 			// An unparseable file shouldn't fail the whole collection —

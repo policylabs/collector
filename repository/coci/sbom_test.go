@@ -4,7 +4,10 @@
 package coci
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"testing"
@@ -14,9 +17,11 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/static"
 	"github.com/google/go-containerregistry/pkg/v1/types"
+	gointoto "github.com/in-toto/attestation/go/v1"
 	"github.com/policylabs/attestation"
 	"github.com/stretchr/testify/require"
 
+	"github.com/policylabs/collector/envelope"
 	"github.com/policylabs/collector/envelope/bare"
 	"github.com/policylabs/collector/predicate/cyclonedx"
 	"github.com/policylabs/collector/predicate/spdx"
@@ -143,4 +148,56 @@ func TestFetchSBOMLayersDisabled(t *testing.T) {
 	atts, err := c.Fetch(ctx, attestation.FetchOptions{})
 	require.NoError(t, err)
 	require.Empty(t, atts)
+}
+
+// requireKeptContent checks that an attestation kept content that hashes to
+// the digest of its origin and returns it.
+func requireKeptContent(t *testing.T, env attestation.Envelope) []byte {
+	t.Helper()
+	content := envelope.OriginContent(env.GetPredicate())
+	require.NotEmpty(t, content)
+	sum := sha256.Sum256(content)
+	require.Equal(t, hex.EncodeToString(sum[:]), env.GetPredicate().GetOrigin().GetDigest()["sha256"])
+	return content
+}
+
+func TestFetchSBOMLayersKeepContent(t *testing.T) {
+	t.Parallel()
+	host := startTestRegistry(t)
+	ctx := t.Context()
+
+	repo := fmt.Sprintf("%s/test/coci/sbom-content", host)
+	digest := pushEmptySubject(t, ctx, repo+":v1")
+	pushSBOMImage(t, ctx, repo, digest, spdxJSONMediaType, []byte(testSPDXDocument))
+
+	c, err := New(WithReference(repo+":v1"), WithCraneOpts(crane.Insecure))
+	require.NoError(t, err)
+
+	atts, err := c.Fetch(ctx, attestation.FetchOptions{})
+	require.NoError(t, err)
+	require.Len(t, atts, 1)
+	require.Nil(t, envelope.OriginContent(atts[0].GetPredicate()), "content is not kept unless asked")
+
+	// The SBOM is not an attestation: what is kept is the statement built
+	// around it, which an envelope parser reads back, image subject and all.
+	atts, err = c.Fetch(ctx, attestation.FetchOptions{KeepContent: true})
+	require.NoError(t, err)
+	require.Len(t, atts, 1)
+	content := requireKeptContent(t, atts[0])
+
+	rd, ok := atts[0].GetPredicate().GetOrigin().(*gointoto.ResourceDescriptor)
+	require.True(t, ok)
+	require.True(t, strings.HasPrefix(rd.GetUri(), "oci:"), rd.GetUri())
+
+	parser := envelope.Parsers.ForMediaType(rd.GetMediaType())
+	require.NotNil(t, parser, rd.GetMediaType())
+	again, err := parser.ParseStream(bytes.NewReader(content))
+	require.NoError(t, err)
+	require.Len(t, again, 1)
+	require.Equal(t, atts[0].GetPredicate().GetType(), again[0].GetPredicate().GetType())
+	require.JSONEq(t, testSPDXDocument, string(again[0].GetPredicate().GetData()))
+
+	subjects := again[0].GetStatement().GetSubjects()
+	require.Len(t, subjects, 1)
+	require.Equal(t, strings.TrimPrefix(digest, "sha256:"), subjects[0].GetDigest()["sha256"])
 }

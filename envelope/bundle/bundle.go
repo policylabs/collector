@@ -99,3 +99,13 @@ func (p *Parser) unmarshalTo(env *Envelope, data []byte) error {
 func (p *Parser) FileExtensions() []string {
 	return []string{"json"}
 }
+
+// MediaTypePrefix starts the media type of every sigstore bundle. The bundle
+// formats are versioned and each bundle declares its own.
+const MediaTypePrefix = "application/vnd.dev.sigstore.bundle"
+
+// ReadsMediaType reports if the parser reads data of a media type: any
+// version of the sigstore bundle.
+func (p *Parser) ReadsMediaType(mediaType string) bool {
+	return strings.HasPrefix(mediaType, MediaTypePrefix)
+}

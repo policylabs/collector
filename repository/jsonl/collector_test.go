@@ -4,10 +4,15 @@
 package jsonl
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"testing"
 
+	intoto "github.com/in-toto/attestation/go/v1"
 	"github.com/policylabs/attestation"
 	"github.com/stretchr/testify/require"
+
+	"github.com/policylabs/collector/envelope"
 )
 
 func TestParseJsonlFile(t *testing.T) {
@@ -94,4 +99,34 @@ func TestNew(t *testing.T) {
 		_, err := New(WithPath("badfile"))
 		require.Error(t, err)
 	})
+}
+
+func TestParseJsonlFileKeepContent(t *testing.T) {
+	t.Parallel()
+	const path = "testdata/multiple.jsonl"
+
+	atts, err := parseJsonlFile(&attestation.FetchOptions{}, path, nil)
+	require.NoError(t, err)
+	for _, att := range atts {
+		require.Nil(t, envelope.OriginContent(att.GetPredicate()), "content is not kept unless asked")
+	}
+
+	atts, err = parseJsonlFile(&attestation.FetchOptions{KeepContent: true}, path, nil)
+	require.NoError(t, err)
+	require.Len(t, atts, 6)
+	for _, att := range atts {
+		origin := att.GetPredicate().GetOrigin()
+		content := envelope.OriginContent(att.GetPredicate())
+		require.NotEmpty(t, content)
+
+		// The origin still names the line the attestation was read from and
+		// its digest is that of the content kept.
+		require.Contains(t, origin.GetUri(), "jsonl:"+path+"#")
+		sum := sha256.Sum256(content)
+		require.Equal(t, hex.EncodeToString(sum[:]), origin.GetDigest()["sha256"])
+
+		rd, ok := origin.(*intoto.ResourceDescriptor)
+		require.True(t, ok)
+		require.True(t, envelope.IsAttestationMediaType(rd.GetMediaType()), rd.GetMediaType())
+	}
 }

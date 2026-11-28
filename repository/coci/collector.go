@@ -29,7 +29,9 @@ import (
 	protorekor "github.com/sigstore/protobuf-specs/gen/pb-go/rekor/v1"
 	sbundle "github.com/sigstore/sigstore-go/pkg/bundle"
 	"github.com/sirupsen/logrus"
+	"google.golang.org/protobuf/encoding/protojson"
 
+	cenvelope "github.com/policylabs/collector/envelope"
 	"github.com/policylabs/collector/envelope/bundle"
 	"github.com/policylabs/collector/envelope/dsse"
 	"github.com/policylabs/collector/internal/readlimit"
@@ -335,32 +337,39 @@ func (c *Collector) fetchAttestationLayers(ctx context.Context, opts attestation
 	return atts, nil
 }
 
-// dsseEnvelopeFromOCILayer this reads the DSSE envelope containing the attestation
-func dsseEnvelopeFromOCILayer(ctx context.Context, opts *attestation.FetchOptions, imageInfo *ImageInfo, l *ggcr.Descriptor, craneOpts ...crane.Option) (*protobundle.Bundle_DsseEnvelope, error) {
+// dsseEnvelopeFromOCILayer reads the DSSE envelope containing the attestation
+// from a layer. The data of the layer is returned with the envelope parsed
+// from it.
+func dsseEnvelopeFromOCILayer(ctx context.Context, opts *attestation.FetchOptions, imageInfo *ImageInfo, l *ggcr.Descriptor, craneOpts ...crane.Option) (*protobundle.Bundle_DsseEnvelope, []byte, error) {
 	// Build the attestation blob reference
 	attRef := imageInfo.Registry + "/" + imageInfo.Repository + "@" + l.Digest.String()
 	layer, err := crane.PullLayer(attRef, append([]crane.Option{crane.WithContext(ctx)}, craneOpts...)...)
 	if err != nil {
-		return nil, fmt.Errorf("pulling layer data: %w", err)
+		return nil, nil, fmt.Errorf("pulling layer data: %w", err)
 	}
 
 	// Parse the DSSE envelop from the signed contents
 	blob, err := layer.Uncompressed()
 	if err != nil {
-		return nil, fmt.Errorf("fetching blob data: %w", err)
+		return nil, nil, fmt.Errorf("fetching blob data: %w", err)
 	}
 	defer blob.Close() //nolint:errcheck
+
+	data, err := io.ReadAll(readlimit.Reader(blob, opts.MaxReadSize))
+	if err != nil {
+		return nil, nil, fmt.Errorf("reading blob data: %w", err)
+	}
 
 	unmarshaler := jsonpb.Unmarshaler{}
 
 	// Unmarshal the data
 	dsseEnv := &protodsse.Envelope{}
-	if err := unmarshaler.Unmarshal(readlimit.Reader(blob, opts.MaxReadSize), dsseEnv); err != nil {
-		return nil, fmt.Errorf("unmarshaling dsse envelope: %w", err)
+	if err := unmarshaler.Unmarshal(bytes.NewReader(data), dsseEnv); err != nil {
+		return nil, nil, fmt.Errorf("unmarshaling dsse envelope: %w", err)
 	}
 
 	// Return the wrapped envelope
-	return &protobundle.Bundle_DsseEnvelope{DsseEnvelope: dsseEnv}, nil
+	return &protobundle.Bundle_DsseEnvelope{DsseEnvelope: dsseEnv}, data, nil
 }
 
 // Some of these functions were adapted to verify DSSE envelopes form the handy
@@ -444,7 +453,7 @@ func getVerificationMaterialTimestampEntries(manifestLayer *ggcr.Descriptor) (*p
 // Otherwise the payload is returned as a plain DSSE envelope that can be
 // verified with a public key.
 func getAttestationEnvelope(ctx context.Context, opts *attestation.FetchOptions, imageInfo *ImageInfo, layer *ggcr.Descriptor, craneOpts ...crane.Option) (attestation.Envelope, error) {
-	dsseEnv, err := dsseEnvelopeFromOCILayer(ctx, opts, imageInfo, layer, craneOpts...)
+	dsseEnv, layerData, err := dsseEnvelopeFromOCILayer(ctx, opts, imageInfo, layer, craneOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("error getting dsse envelope from layer: %w", err)
 	}
@@ -460,7 +469,11 @@ func getAttestationEnvelope(ctx context.Context, opts *attestation.FetchOptions,
 		// envelope so the attestation is still returned and can be
 		// verified with a public key.
 		logrus.Debugf("coci: no verification material in layer, falling back to plain DSSE: %v", err)
-		return buildPlainDSSEEnvelope(dsseEnv, originURI)
+		// The layer is the attestation: it is what gets kept
+		if !opts.KeepContent {
+			layerData = nil
+		}
+		return buildPlainDSSEEnvelope(dsseEnv, originURI, layerData)
 	}
 
 	mt, err := sbundle.MediaTypeString("v0.3")
@@ -489,6 +502,20 @@ func getAttestationEnvelope(ctx context.Context, opts *attestation.FetchOptions,
 	// as is and let the caller decide what to do with it.
 	if pred := envelope.GetPredicate(); pred != nil {
 		pred.SetOrigin(origin[0])
+
+		// The bundle is put together here, from the layer and from the
+		// verification material in its annotations: no single piece of
+		// data read is the attestation. What is kept is the bundle as it
+		// serializes, which verifies on its own.
+		if opts.KeepContent {
+			data, err := protojson.Marshal(&envelope.Bundle)
+			if err != nil {
+				return nil, fmt.Errorf("serializing bundle: %w", err)
+			}
+			if err := cenvelope.KeepData(envelope, data, envelope.GetMediaType()); err != nil {
+				return nil, fmt.Errorf("keeping bundle: %w", err)
+			}
+		}
 	}
 
 	return envelope, nil
@@ -497,7 +524,10 @@ func getAttestationEnvelope(ctx context.Context, opts *attestation.FetchOptions,
 // buildPlainDSSEEnvelope wraps a raw DSSE protobuf envelope into the
 // collector's dsse.Envelope type so it can be returned without sigstore
 // verification material and verified with a public key instead.
-func buildPlainDSSEEnvelope(dsseEnv *protobundle.Bundle_DsseEnvelope, originURI string) (attestation.Envelope, error) {
+//
+// When keep, the data of the layer the envelope was read from, is not empty
+// it is kept as the content of the origin of the attestation.
+func buildPlainDSSEEnvelope(dsseEnv *protobundle.Bundle_DsseEnvelope, originURI string, keep []byte) (attestation.Envelope, error) {
 	env := &dsse.Envelope{
 		Envelope: dsseEnv.DsseEnvelope,
 	}
@@ -518,6 +548,11 @@ func buildPlainDSSEEnvelope(dsseEnv *protobundle.Bundle_DsseEnvelope, originURI 
 	origin[0].Uri = originURI
 	if pred := env.GetPredicate(); pred != nil {
 		pred.SetOrigin(origin[0])
+		if len(keep) > 0 {
+			if err := cenvelope.KeepData(env, keep, dsse.MediaType); err != nil {
+				return nil, fmt.Errorf("keeping envelope: %w", err)
+			}
+		}
 	}
 
 	return env, nil

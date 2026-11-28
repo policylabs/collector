@@ -28,12 +28,14 @@ import (
 	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/storage/memory"
+	intoto "github.com/in-toto/attestation/go/v1"
 	"github.com/policylabs/attestation"
 	"github.com/policylabs/signer/key"
 	"github.com/sirupsen/logrus"
 
 	"github.com/policylabs/collector/filters"
 	"github.com/policylabs/collector/gitobject"
+	"github.com/policylabs/collector/repository"
 	"github.com/policylabs/collector/repository/filesystem"
 )
 
@@ -86,6 +88,61 @@ type Collector struct {
 	// subject query, by sha; a sha that could not be described is nil.
 	described   map[string]attestation.Envelope
 	describedMu sync.Mutex
+	// origins holds, for each attestation describing a git object, the
+	// origin that keeps the object. The attestations are built once and
+	// served to every fetch, so they carry no origin themselves: a fetch
+	// that asks to keep content gets copies that do (see kept).
+	origins   map[attestation.Envelope]*intoto.ResourceDescriptor
+	originsMu sync.RWMutex
+}
+
+// keepOrigin remembers the origin of an attestation describing a git object
+// of a repository, to hand it to the fetches that ask to keep content. An
+// object whose origin cannot be built is served without one.
+func (c *Collector) keepOrigin(repo *git.Repository, env attestation.Envelope, objType plumbing.ObjectType, hash plumbing.Hash) {
+	origin, err := c.synthesizer.Origin(repo, objType, hash, TypeMoniker)
+	if err != nil {
+		logrus.Debugf("git: not keeping %s %s: %v", objType, hash, err)
+		return
+	}
+	c.originsMu.Lock()
+	defer c.originsMu.Unlock()
+	if c.origins == nil {
+		c.origins = map[attestation.Envelope]*intoto.ResourceDescriptor{}
+	}
+	c.origins[env] = origin
+}
+
+// kept returns the attestations describing git objects as a fetch is to get
+// them: as they are, or, when the fetch asks to keep content, as copies
+// whose origin keeps the git object each was built from.
+func (c *Collector) kept(objects []attestation.Envelope, opts attestation.FetchOptions) []attestation.Envelope {
+	if !opts.KeepContent {
+		return objects
+	}
+	c.originsMu.RLock()
+	defer c.originsMu.RUnlock()
+	ret := make([]attestation.Envelope, 0, len(objects))
+	for _, env := range objects {
+		origin, ok := c.origins[env]
+		if !ok {
+			ret = append(ret, env)
+			continue
+		}
+		with, err := gitobject.WithOrigin(env, origin)
+		if err != nil {
+			logrus.Debugf("git: not keeping the content of an attestation: %v", err)
+			with = env
+		}
+		ret = append(ret, with)
+	}
+	return ret
+}
+
+// Reassemble rebuilds the attestation kept in an origin by this repository
+// type: the one describing a git commit or tag (see gitobject.Reassemble).
+func Reassemble(ctx context.Context, origin *intoto.ResourceDescriptor, opts repository.ReassembleOptions) ([]attestation.Envelope, error) {
+	return gitobject.Reassemble(ctx, origin, opts)
 }
 
 // SetKeys sets the keys that verify detached signatures in the checkout and
@@ -261,6 +318,8 @@ func (c *Collector) describeCommit(ctx context.Context, sha string) attestation.
 	} else if env, err = c.synthesizer.Commit(ctx, r, *hash); err != nil {
 		logrus.Debugf("git: not describing %s: %v", sha, err)
 		env = nil
+	} else {
+		c.keepOrigin(r, env, plumbing.CommitObject, *hash)
 	}
 	c.described[sha] = env
 	return env
@@ -288,6 +347,7 @@ func (c *Collector) describe(ctx context.Context, ref plumbing.ReferenceName) ([
 	if err != nil {
 		return nil, fmt.Errorf("describing commit %s: %w", head.Hash(), err)
 	}
+	c.keepOrigin(c.Repo, commit, plumbing.CommitObject, head.Hash())
 	objects := []attestation.Envelope{commit}
 	if !ref.IsTag() {
 		return objects, nil
@@ -299,6 +359,9 @@ func (c *Collector) describe(ctx context.Context, ref plumbing.ReferenceName) ([
 	case err != nil:
 		return nil, fmt.Errorf("describing tag %s: %w", ref.Short(), err)
 	default:
+		if tagRef, err := c.Repo.Reference(plumbing.NewTagReferenceName(ref.Short()), true); err == nil {
+			c.keepOrigin(c.Repo, tag, plumbing.TagObject, tagRef.Hash())
+		}
 		objects = append(objects, tag)
 	}
 	return objects, nil
@@ -321,7 +384,7 @@ func (c *Collector) Fetch(ctx context.Context, opts attestation.FetchOptions) ([
 	if err != nil {
 		return nil, err
 	}
-	return limit(append(append([]attestation.Envelope{}, c.objects...), files...), opts), nil
+	return limit(append(append([]attestation.Envelope{}, c.kept(c.objects, opts)...), files...), opts), nil
 }
 
 // FetchBySubject returns the attestations whose subjects carry any of the
@@ -350,7 +413,7 @@ func (c *Collector) FetchBySubject(ctx context.Context, opts attestation.FetchOp
 		}
 		objects = attestation.NewQuery().WithFilter(matcher).Run(objects)
 	}
-	return limit(append(objects, files...), opts), nil
+	return limit(append(c.kept(objects, opts), files...), opts), nil
 }
 
 // commitShas returns the full commit shas the subjects name.
@@ -381,7 +444,7 @@ func (c *Collector) FetchByPredicateType(ctx context.Context, opts attestation.F
 		matcher.PredicateTypes[pt] = struct{}{}
 	}
 	objects := attestation.NewQuery().WithFilter(matcher).Run(c.objects)
-	return limit(append(objects, files...), opts), nil
+	return limit(append(c.kept(objects, opts), files...), opts), nil
 }
 
 func limit(envs []attestation.Envelope, opts attestation.FetchOptions) []attestation.Envelope {

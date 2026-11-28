@@ -46,6 +46,11 @@ func (p *Parser) ParseStream(r io.Reader) ([]attestation.Envelope, error) {
 	// json data is an attestation.
 	s, err := statement.Parsers.Parse(data)
 	if err == nil {
+		// Register the attestation digests in its source, as when the
+		// statement is synthesized below.
+		if s.GetPredicate() != nil {
+			s.GetPredicate().SetOrigin(digests.ToResourceDescriptors()[0])
+		}
 		env.Statement = s
 		return []attestation.Envelope{env}, nil
 	}
@@ -71,4 +76,14 @@ func (p *Parser) ParseStream(r io.Reader) ([]attestation.Envelope, error) {
 // FileExtensions returns the file extennsions this parser will look at.
 func (p *Parser) FileExtensions() []string {
 	return []string{"json"}
+}
+
+// MediaType is the media type of an unsigned in-toto statement.
+const MediaType = "application/vnd.in-toto+json"
+
+// ReadsMediaType reports if the parser reads data of a media type. The
+// parser takes about any JSON and wraps it in a statement, but the only data
+// it reads back as the attestation it is, is a statement.
+func (p *Parser) ReadsMediaType(mediaType string) bool {
+	return mediaType == MediaType
 }

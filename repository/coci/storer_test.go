@@ -4,6 +4,7 @@
 package coci
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/hex"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/google/go-containerregistry/pkg/crane"
 	"github.com/google/go-containerregistry/pkg/v1/empty"
+	gointoto "github.com/in-toto/attestation/go/v1"
 	"github.com/olareg/olareg"
 	olaregconfig "github.com/olareg/olareg/config"
 	"github.com/policylabs/attestation"
@@ -26,7 +28,9 @@ import (
 	protorekor "github.com/sigstore/protobuf-specs/gen/pb-go/rekor/v1"
 	sbundle "github.com/sigstore/sigstore-go/pkg/bundle"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 
+	cenvelope "github.com/policylabs/collector/envelope"
 	"github.com/policylabs/collector/envelope/bundle"
 	"github.com/policylabs/collector/envelope/dsse"
 )
@@ -226,6 +230,70 @@ func TestStoreRoundTripBundleWithCosignAnnotations(t *testing.T) {
 	ts := got.Bundle.GetVerificationMaterial().GetTimestampVerificationData().GetRfc3161Timestamps()
 	require.Len(t, ts, 1)
 	require.Equal(t, tsDER, ts[0].GetSignedTimestamp())
+
+	// Nothing is kept unless asked
+	require.Nil(t, cenvelope.OriginContent(got.GetPredicate()))
+
+	// The bundle is put together from the layer and its annotations, so
+	// what is kept is the bundle as it serializes. It reads back through
+	// the bundle parser with the verification material it had.
+	atts, err = c.Fetch(ctx, attestation.FetchOptions{KeepContent: true})
+	require.NoError(t, err)
+	require.Len(t, atts, 1)
+	content := requireKeptContent(t, atts[0])
+
+	rd, ok := atts[0].GetPredicate().GetOrigin().(*gointoto.ResourceDescriptor)
+	require.True(t, ok)
+	require.Equal(t, mt, rd.GetMediaType())
+	require.True(t, strings.HasPrefix(rd.GetUri(), "oci:"), rd.GetUri())
+
+	parser := cenvelope.Parsers.ForMediaType(rd.GetMediaType())
+	require.IsType(t, &bundle.Parser{}, parser)
+	again, err := parser.ParseStream(bytes.NewReader(content))
+	require.NoError(t, err)
+	require.Len(t, again, 1)
+	back, ok := again[0].(*bundle.Envelope)
+	require.True(t, ok)
+	fetched, ok := atts[0].(*bundle.Envelope)
+	require.True(t, ok)
+	require.True(t, proto.Equal(&fetched.Bundle, &back.Bundle), "the bundle read back differs from the one fetched")
+	require.Equal(t, atts[0].GetPredicate().GetType(), back.GetPredicate().GetType())
+}
+
+// A layer without verification material is the attestation itself, a DSSE
+// envelope, and is kept as it was read from the registry.
+func TestFetchKeepContentPlainDSSE(t *testing.T) {
+	t.Parallel()
+	host := startTestRegistry(t)
+	ctx := t.Context()
+
+	repo := fmt.Sprintf("%s/test/coci/dsse-content:v1", host)
+	pushEmptySubject(t, ctx, repo)
+
+	c, err := New(WithReference(repo), WithCraneOpts(crane.Insecure))
+	require.NoError(t, err)
+	require.NoError(t, c.Store(ctx, attestation.StoreOptions{}, []attestation.Envelope{makeDSSEEnvelope()}))
+
+	atts, err := c.Fetch(ctx, attestation.FetchOptions{})
+	require.NoError(t, err)
+	require.Len(t, atts, 1)
+	require.Nil(t, cenvelope.OriginContent(atts[0].GetPredicate()), "content is not kept unless asked")
+
+	atts, err = c.Fetch(ctx, attestation.FetchOptions{KeepContent: true})
+	require.NoError(t, err)
+	require.Len(t, atts, 1)
+	content := requireKeptContent(t, atts[0])
+
+	rd, ok := atts[0].GetPredicate().GetOrigin().(*gointoto.ResourceDescriptor)
+	require.True(t, ok)
+	require.Equal(t, dsse.MediaType, rd.GetMediaType())
+
+	again, err := cenvelope.Parsers.ForMediaType(rd.GetMediaType()).ParseStream(bytes.NewReader(content))
+	require.NoError(t, err)
+	require.Len(t, again, 1)
+	require.Equal(t, atts[0].GetPredicate().GetType(), again[0].GetPredicate().GetType())
+	require.JSONEq(t, string(atts[0].GetPredicate().GetData()), string(again[0].GetPredicate().GetData()))
+	require.Len(t, again[0].GetSignatures(), 1)
 }
 
 // layerAnnotations returns the annotations of every layer in the .att manifest

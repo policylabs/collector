@@ -4,7 +4,9 @@
 package pypi
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -16,7 +18,12 @@ import (
 	gointoto "github.com/in-toto/attestation/go/v1"
 	"github.com/policylabs/attestation"
 	sapi "github.com/policylabs/signer/api/v1"
+	protobundle "github.com/sigstore/protobuf-specs/gen/pb-go/bundle/v1"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/encoding/protojson"
+
+	"github.com/policylabs/collector/envelope"
+	"github.com/policylabs/collector/repository"
 )
 
 const (
@@ -362,4 +369,144 @@ func TestFetchVerify(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, string(payload), `"predicate":null`)
 	require.Equal(t, wheelSHA256, env.GetStatement().GetSubjects()[0].GetDigest()["sha256"])
+}
+
+// requireKeptContent checks that an attestation kept content that hashes to
+// the digest of its origin and returns it.
+func requireKeptContent(t *testing.T, env attestation.Envelope) []byte {
+	t.Helper()
+	content := envelope.OriginContent(env.GetPredicate())
+	require.NotEmpty(t, content)
+	sum := sha256.Sum256(content)
+	require.Equal(t, hex.EncodeToString(sum[:]), env.GetPredicate().GetOrigin().GetDigest()["sha256"])
+	return content
+}
+
+func TestFetchKeepContent(t *testing.T) {
+	t.Parallel()
+	srv := newTestIndex(t)
+	t.Cleanup(srv.Close)
+
+	c, err := New(WithPackageURL("pkg:pypi/sampleproject@4.0.0?file_name="+sdistName), WithIndexURL(srv.URL))
+	require.NoError(t, err)
+
+	envs, err := c.Fetch(t.Context(), attestation.FetchOptions{})
+	require.NoError(t, err)
+	require.Len(t, envs, 1)
+	require.Nil(t, envelope.OriginContent(envs[0].GetPredicate()), "content is not kept unless asked")
+
+	envs, err = c.Fetch(t.Context(), attestation.FetchOptions{KeepContent: true})
+	require.NoError(t, err)
+	require.Len(t, envs, 1)
+	content := requireKeptContent(t, envs[0])
+
+	origin := envs[0].GetPredicate().GetOrigin()
+	require.Equal(t, sdistName, origin.GetName())
+	require.Equal(t, "pkg:pypi/sampleproject@4.0.0?file_name="+sdistName, origin.GetUri())
+
+	// What is kept is a sigstore bundle carrying the statement as it was
+	// signed, with the material to verify it; not the synthesized statement.
+	kept := &protobundle.Bundle{}
+	require.NoError(t, protojson.Unmarshal(content, kept))
+	require.NotNil(t, kept.GetVerificationMaterial().GetCertificate())
+	require.NotEmpty(t, kept.GetVerificationMaterial().GetTlogEntries())
+	require.NotEmpty(t, kept.GetDsseEnvelope().GetSignatures())
+	require.NotContains(t, string(kept.GetDsseEnvelope().GetPayload()), ExtensionKey)
+	require.Contains(t, string(envs[0].GetPredicate().GetData()), ExtensionKey)
+
+	// Which is why it carries no media type: parsing the bundle does not
+	// give the statement that was served, it has to be synthesized again.
+	// The origin names this repository type to do it.
+	rd, ok := origin.(*gointoto.ResourceDescriptor)
+	require.True(t, ok)
+	require.Empty(t, rd.GetMediaType())
+	require.Equal(t, TypeMoniker, repository.Annotated(rd))
+	require.Contains(t, repository.Material(rd), materialPublisher)
+	require.Contains(t, repository.Material(rd), materialDistribution)
+}
+
+// TestReassemble checks that an attestation whose statement was synthesized
+// is rebuilt from what its origin keeps into the attestation that was
+// served, and that it verifies as the original did.
+func TestReassemble(t *testing.T) {
+	t.Parallel()
+	srv := newTestIndex(t)
+	t.Cleanup(srv.Close)
+
+	c, err := New(WithPackageURL("pkg:pypi/sampleproject@4.0.0?file_name="+wheelName), WithIndexURL(srv.URL))
+	require.NoError(t, err)
+	envs, err := c.Fetch(t.Context(), attestation.FetchOptions{KeepContent: true})
+	require.NoError(t, err)
+	require.Len(t, envs, 1)
+	original := envs[0]
+
+	// The origin travels serialized, in the results of an evaluation
+	kept, ok := original.GetPredicate().GetOrigin().(*gointoto.ResourceDescriptor)
+	require.True(t, ok)
+	data, err := protojson.Marshal(kept)
+	require.NoError(t, err)
+	origin := &gointoto.ResourceDescriptor{}
+	require.NoError(t, protojson.Unmarshal(data, origin))
+
+	rebuilt, err := Reassemble(t.Context(), origin, repository.ReassembleOptions{})
+	require.NoError(t, err)
+	require.Len(t, rebuilt, 1)
+	env := rebuilt[0]
+
+	// The statement is the one that was served: synthesized predicate and
+	// subjects named as the repository names them.
+	require.Equal(t, PublishPredicateType, env.GetPredicate().GetType())
+	require.JSONEq(t, string(original.GetPredicate().GetData()), string(env.GetPredicate().GetData()))
+	require.Contains(t, string(env.GetPredicate().GetData()), ExtensionKey)
+	want, got := original.GetStatement().GetSubjects(), env.GetStatement().GetSubjects()
+	require.Len(t, got, len(want))
+	for i := range want {
+		require.Equal(t, want[i].GetName(), got[i].GetName())
+		require.Equal(t, want[i].GetUri(), got[i].GetUri())
+		require.Equal(t, want[i].GetDigest(), got[i].GetDigest())
+	}
+
+	// It verifies over the signed payload, to the same identity
+	require.NoError(t, original.Verify())
+	require.NoError(t, env.Verify())
+	require.True(t, env.GetVerification().GetVerified())
+	identity := func(e attestation.Envelope) string {
+		sv, ok := e.GetVerification().(*sapi.Verification)
+		require.True(t, ok)
+		ids := sv.GetSignature().GetIdentities()
+		require.Len(t, ids, 1)
+		return ids[0].GetSigstore().GetIdentity()
+	}
+	require.Equal(t, identity(original), identity(env))
+}
+
+func TestReassembleErrors(t *testing.T) {
+	t.Parallel()
+	srv := newTestIndex(t)
+	t.Cleanup(srv.Close)
+
+	c, err := New(WithPackageURL("pkg:pypi/sampleproject@4.0.0?file_name="+wheelName), WithIndexURL(srv.URL))
+	require.NoError(t, err)
+	envs, err := c.Fetch(t.Context(), attestation.FetchOptions{KeepContent: true})
+	require.NoError(t, err)
+	kept, ok := envs[0].GetPredicate().GetOrigin().(*gointoto.ResourceDescriptor)
+	require.True(t, ok)
+
+	t.Run("not-a-bundle", func(t *testing.T) {
+		t.Parallel()
+		_, err := Reassemble(t.Context(), &gointoto.ResourceDescriptor{Content: []byte("not a bundle")}, repository.ReassembleOptions{})
+		require.Error(t, err)
+	})
+	t.Run("no-material", func(t *testing.T) {
+		t.Parallel()
+		_, err := Reassemble(t.Context(), &gointoto.ResourceDescriptor{Content: kept.GetContent()}, repository.ReassembleOptions{})
+		require.ErrorContains(t, err, "no reassembly material")
+	})
+	t.Run("no-distribution", func(t *testing.T) {
+		t.Parallel()
+		origin := &gointoto.ResourceDescriptor{Content: kept.GetContent()}
+		require.NoError(t, repository.Annotate(origin, TypeMoniker, map[string]any{}))
+		_, err := Reassemble(t.Context(), origin, repository.ReassembleOptions{})
+		require.ErrorContains(t, err, "no distribution file")
+	})
 }

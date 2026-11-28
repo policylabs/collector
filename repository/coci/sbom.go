@@ -18,6 +18,7 @@ import (
 	"github.com/policylabs/attestation"
 	"github.com/sirupsen/logrus"
 
+	"github.com/policylabs/collector/envelope"
 	"github.com/policylabs/collector/envelope/bare"
 	"github.com/policylabs/collector/internal/readlimit"
 	"github.com/policylabs/collector/predicate/cyclonedx"
@@ -138,7 +139,17 @@ func (c *Collector) getSBOMEnvelope(
 		intoto.WithSubject(subject),
 	)
 
-	return &bare.Envelope{Statement: stmt}, nil
+	env := &bare.Envelope{Statement: stmt}
+
+	// The SBOM is not an attestation: what is kept is the statement built
+	// around it, which carries the image as its subject. The origin still
+	// names the layer the SBOM was read from.
+	if opts.KeepContent {
+		if err := envelope.KeepStatement(env); err != nil {
+			return nil, fmt.Errorf("keeping SBOM statement: %w", err)
+		}
+	}
+	return env, nil
 }
 
 // parseSBOM returns the predicate of the first parser that claims the

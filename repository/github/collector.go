@@ -19,6 +19,7 @@ import (
 	"github.com/policylabs/attestation"
 	"github.com/sirupsen/logrus"
 
+	"github.com/policylabs/collector/envelope"
 	"github.com/policylabs/collector/envelope/bundle"
 	"github.com/policylabs/collector/internal/readlimit"
 	"github.com/policylabs/collector/repository"
@@ -154,7 +155,7 @@ func (c *Collector) FetchBySubject(ctx context.Context, opts attestation.FetchOp
 			url = fmt.Sprintf("/repos/%s/%s/attestations/%s", c.Options.Owner, c.Options.Repo, digest)
 		}
 
-		envs, _, err := c.fetchFromUrl(ctx, url, opts.MaxReadSize)
+		envs, _, err := c.fetchFromUrl(ctx, url, opts)
 		if err != nil {
 			return nil, fmt.Errorf("fetching attestations: %w", err)
 		}
@@ -177,7 +178,7 @@ func (c *Collector) FetchBySubject(ctx context.Context, opts attestation.FetchOp
 // this will return true in the boolean if more requests are needed.
 //
 //nolint:unparam
-func (c *Collector) fetchFromUrl(ctx context.Context, url string, maxReadSize int64) ([]fetchedEnvelope, bool, error) {
+func (c *Collector) fetchFromUrl(ctx context.Context, url string, opts attestation.FetchOptions) ([]fetchedEnvelope, bool, error) {
 	ret := []fetchedEnvelope{}
 
 	// Call the API:
@@ -193,7 +194,7 @@ func (c *Collector) fetchFromUrl(ctx context.Context, url string, maxReadSize in
 	defer resp.Body.Close() //nolint:errcheck
 	res := &attResponse{}
 
-	dec := json.NewDecoder(readlimit.Reader(resp.Body, maxReadSize))
+	dec := json.NewDecoder(readlimit.Reader(resp.Body, opts.MaxReadSize))
 	if err := dec.Decode(res); err != nil {
 		return nil, false, fmt.Errorf("parsing response: %w", err)
 	}
@@ -207,6 +208,9 @@ func (c *Collector) fetchFromUrl(ctx context.Context, url string, maxReadSize in
 		parsed, err := (&bundle.Parser{}).Parse(e.Bundle)
 		if err != nil {
 			return nil, false, fmt.Errorf("parsing attestation bundle: %w", err)
+		}
+		if opts.KeepContent {
+			envelope.KeepContent(parsed, e.Bundle)
 		}
 		// Key the attestation on the bundle bytes as served, the same
 		// attestation is returned for every digest of its subject.

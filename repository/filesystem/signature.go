@@ -135,6 +135,9 @@ func (c *Collector) processSigstoreBundle(path, ext string, opts attestation.Fet
 	// Try to parse as a normal attestation (DSSE bundle)
 	parsed, err := envelope.Parsers.Parse(bytes.NewReader(sigData))
 	if err == nil && len(parsed) > 0 {
+		if opts.KeepContent {
+			envelope.KeepContent(parsed, sigData)
+		}
 		if opts.Query != nil {
 			parsed = opts.Query.Run(parsed)
 		}
@@ -186,6 +189,9 @@ func (c *Collector) processRawSignature(ctx context.Context, path, ext string, f
 	// Try to parse as a normal attestation (DSSE/bundle)
 	parsed, err := envelope.Parsers.Parse(bytes.NewReader(sigData))
 	if err == nil && len(parsed) > 0 {
+		if opts.KeepContent {
+			envelope.KeepContent(parsed, sigData)
+		}
 		if opts.Query != nil {
 			parsed = opts.Query.Run(parsed)
 		}

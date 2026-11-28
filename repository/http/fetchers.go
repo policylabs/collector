@@ -46,11 +46,7 @@ func fetchGeneral(ctx context.Context, opts *Options, fo attestation.FetchOption
 
 		// Parse the request output
 		var atts []attestation.Envelope
-		if opts.ReadJSONL {
-			atts, err = envelope.NewJSONL().Parse(datas[i])
-		} else {
-			atts, err = envelope.Parsers.Parse(bytes.NewReader(datas[i]))
-		}
+		atts, err = parseResponse(opts, fo, datas[i])
 		if err != nil {
 			return nil, fmt.Errorf("parsing attestation data: %w", err)
 		}
@@ -154,11 +150,7 @@ func fetchBySubject(ctx context.Context, opts *Options, fo attestation.FetchOpti
 		}
 
 		var atts []attestation.Envelope
-		if opts.ReadJSONL {
-			atts, err = envelope.NewJSONL().Parse(data)
-		} else {
-			atts, err = envelope.Parsers.Parse(bytes.NewReader(data))
-		}
+		atts, err = parseResponse(opts, fo, data)
 		if err != nil {
 			return nil, fmt.Errorf("parsing attestation data: %w", err)
 		}
@@ -200,11 +192,7 @@ func fetchByPredicateType(ctx context.Context, opts *Options, fo attestation.Fet
 		}
 
 		var atts []attestation.Envelope
-		if opts.ReadJSONL {
-			atts, err = envelope.NewJSONL().Parse(data)
-		} else {
-			atts, err = envelope.Parsers.Parse(bytes.NewReader(data))
-		}
+		atts, err = parseResponse(opts, fo, data)
 		if err != nil {
 			return nil, fmt.Errorf("parsing attestation data: %w", err)
 		}
@@ -219,6 +207,19 @@ func fetchByPredicateType(ctx context.Context, opts *Options, fo attestation.Fet
 
 // agent builds the HTTP agent the fetchers share: the configured retries
 // and timeout, and HTTP errors reported as failures.
+// parseResponse parses the body of a response into attestations, keeping
+// each one's data in its origin when the fetch options ask for it.
+func parseResponse(opts *Options, fo attestation.FetchOptions, data []byte) ([]attestation.Envelope, error) {
+	if opts.ReadJSONL {
+		return (&envelope.JsonlParser{KeepContent: fo.KeepContent}).Parse(data)
+	}
+	atts, err := envelope.Parsers.Parse(bytes.NewReader(data))
+	if err == nil && fo.KeepContent {
+		envelope.KeepContent(atts, data)
+	}
+	return atts, err
+}
+
 func agent(opts *Options) *http.Agent {
 	return http.NewAgent().WithRetries(opts.Retries).WithTimeout(opts.Timeout).WithFailOnHTTPError(true)
 }

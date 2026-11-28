@@ -121,7 +121,7 @@ func TestFetchFromUrl(t *testing.T) {
 			res, _, err := collector.fetchFromUrl(
 				t.Context(),
 				"users/carabiner-dev/attestations/sha256:2775bba8b2170bef2f91b79d4f179fd87724ffee32b4a20b8304856fd3bf4b8f",
-				0,
+				attestation.FetchOptions{},
 			)
 			if tc.synterr != nil {
 				require.Error(t, err)

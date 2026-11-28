@@ -100,7 +100,7 @@ func (c *Collector) fetchForPurl(ctx context.Context, opts attestation.FetchOpti
 			logrus.Debugf("pypi: no provenance for %s", dists[i].Filename)
 			continue
 		}
-		envs, err := prov.Envelopes(&dists[i])
+		envs, err := prov.envelopes(&dists[i], opts.KeepContent)
 		if err != nil {
 			return nil, fmt.Errorf("reading provenance of %s: %w", dists[i].Filename, err)
 		}
