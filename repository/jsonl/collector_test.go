@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"testing"
 
+	intoto "github.com/in-toto/attestation/go/v1"
 	"github.com/policylabs/attestation"
 	"github.com/stretchr/testify/require"
 
@@ -123,5 +124,9 @@ func TestParseJsonlFileKeepContent(t *testing.T) {
 		require.Contains(t, origin.GetUri(), "jsonl:"+path+"#")
 		sum := sha256.Sum256(content)
 		require.Equal(t, hex.EncodeToString(sum[:]), origin.GetDigest()["sha256"])
+
+		rd, ok := origin.(*intoto.ResourceDescriptor)
+		require.True(t, ok)
+		require.True(t, envelope.IsAttestationMediaType(rd.GetMediaType()), rd.GetMediaType())
 	}
 }

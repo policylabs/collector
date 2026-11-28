@@ -142,10 +142,10 @@ func (c *Collector) Fetch(ctx context.Context, opts attestation.FetchOptions) ([
 				Uri:    fmt.Sprintf("jsonl:%s#%d", c.Options.Locator, i),
 				Digest: envelopes[0].GetStatement().GetPredicate().GetOrigin().GetDigest(),
 			}
-			if opts.KeepContent {
-				rd.Content = data
-			}
 			envelopes[0].GetStatement().GetPredicate().SetOrigin(rd)
+			if opts.KeepContent {
+				envelope.KeepContent(envelopes, data)
+			}
 		}
 
 		ret = append(ret, envelopes...)

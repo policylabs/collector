@@ -412,4 +412,10 @@ func TestFetchKeepContent(t *testing.T) {
 	require.NotEmpty(t, kept.GetDsseEnvelope().GetSignatures())
 	require.NotContains(t, string(kept.GetDsseEnvelope().GetPayload()), ExtensionKey)
 	require.Contains(t, string(envs[0].GetPredicate().GetData()), ExtensionKey)
+
+	// Which is why it carries no media type: parsing the bundle does not
+	// give the statement that was served, it has to be synthesized again.
+	rd, ok := origin.(*gointoto.ResourceDescriptor)
+	require.True(t, ok)
+	require.Empty(t, rd.GetMediaType())
 }

@@ -17,6 +17,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/static"
 	"github.com/google/go-containerregistry/pkg/v1/types"
+	gointoto "github.com/in-toto/attestation/go/v1"
 	"github.com/policylabs/attestation"
 	"github.com/stretchr/testify/require"
 
@@ -182,4 +183,11 @@ func TestFetchSBOMLayersKeepContent(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, atts, 1)
 	require.True(t, bytes.Equal([]byte(testSPDXDocument), requireKeptContent(t, atts[0])), "kept content differs from the layer")
+
+	// An SBOM is not an attestation: its media type is the layer's
+	rd, ok := atts[0].GetPredicate().GetOrigin().(*gointoto.ResourceDescriptor)
+	require.True(t, ok)
+	layerType := spdxJSONMediaType
+	require.Equal(t, layerType, rd.GetMediaType())
+	require.False(t, envelope.IsAttestationMediaType(rd.GetMediaType()))
 }

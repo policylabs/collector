@@ -274,6 +274,19 @@ func keepBundle(env attestation.Envelope, dist *Distribution) error {
 	origin.Name = dist.Filename
 	origin.Uri = dist.purl()
 	origin.Content = data
+
+	// The bundle is the attestation only when the statement is served as it
+	// was signed. A synthesized statement cannot be parsed back out of the
+	// bundle, so its content is left without a media type: reading it back
+	// means running the synthesis again.
+	signed := &gointoto.Statement{}
+	if err := protojson.Unmarshal(b.GetDsseEnvelope().GetPayload(), signed); err != nil {
+		return fmt.Errorf("decoding signed statement: %w", err)
+	}
+	if signed.GetPredicate() != nil && len(signed.GetPredicate().GetFields()) > 0 {
+		origin.MediaType = b.GetMediaType()
+	}
+
 	pred.SetOrigin(origin)
 	return nil
 }

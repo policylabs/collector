@@ -119,10 +119,10 @@ func parseJsonlFile(opts *attestation.FetchOptions, path string, filterset *atte
 				Uri:    fmt.Sprintf("jsonl:%s#%d", path, i),
 				Digest: envelopes[0].GetStatement().GetPredicate().GetOrigin().GetDigest(),
 			}
-			if opts.KeepContent {
-				rd.Content = data
-			}
 			envelopes[0].GetStatement().GetPredicate().SetOrigin(rd)
+			if opts.KeepContent {
+				envelope.KeepContent(envelopes, data)
+			}
 		}
 		ret = append(ret, filterset.FilterList(envelopes)...)
 

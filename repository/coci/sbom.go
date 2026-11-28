@@ -133,6 +133,7 @@ func (c *Collector) getSBOMEnvelope(
 	origin.Uri = "oci:" + sbomRef
 	if opts.KeepContent {
 		origin.Content = data
+		origin.MediaType = string(layer.MediaType)
 	}
 	pred.SetOrigin(origin)
 
