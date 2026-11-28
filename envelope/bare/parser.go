@@ -77,3 +77,13 @@ func (p *Parser) ParseStream(r io.Reader) ([]attestation.Envelope, error) {
 func (p *Parser) FileExtensions() []string {
 	return []string{"json"}
 }
+
+// MediaType is the media type of an unsigned in-toto statement.
+const MediaType = "application/vnd.in-toto+json"
+
+// ReadsMediaType reports if the parser reads data of a media type. The
+// parser takes about any JSON and wraps it in a statement, but the only data
+// it reads back as the attestation it is, is a statement.
+func (p *Parser) ReadsMediaType(mediaType string) bool {
+	return mediaType == MediaType
+}

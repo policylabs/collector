@@ -4,11 +4,16 @@
 package envelope
 
 import (
+	"bytes"
 	"encoding/json"
-	"strings"
+	"errors"
+	"fmt"
+	"io"
 
+	"github.com/carabiner-dev/hasher"
 	intoto "github.com/in-toto/attestation/go/v1"
 	"github.com/policylabs/attestation"
+	"github.com/sirupsen/logrus"
 
 	"github.com/policylabs/collector/envelope/bare"
 	"github.com/policylabs/collector/envelope/bundle"
@@ -16,77 +21,55 @@ import (
 	"github.com/policylabs/collector/statement"
 )
 
-// Media types recorded with the content kept in the origin of an attestation.
-// They tell whoever reads the content back what to do with it.
-//
-// Content of one of the attestation media types (see IsAttestationMediaType)
-// is the attestation itself and parses again into what was evaluated.
-// Content of any other type is the material an attestation was built from:
-// reading it back means reassembling the attestation as the repository that
-// kept it did.
-const (
-	// MediaTypeBundle is the type of a sigstore bundle. The bundle formats
-	// are versioned: bundles carry their own media type and it is what gets
-	// recorded, this is the prefix they share.
-	MediaTypeBundle = "application/vnd.dev.sigstore.bundle"
-
-	// MediaTypeDSSE is the type of a DSSE envelope.
-	MediaTypeDSSE = "application/vnd.dsse.envelope.v1+json"
-
-	// MediaTypeInToto is the type of an unsigned in-toto statement.
-	MediaTypeInToto = "application/vnd.in-toto+json"
-
-	// MediaTypeJSON is the type recorded for JSON data that is not an
-	// attestation: a predicate (an SBOM, a scanner report) the parser
-	// wrapped in a statement of its own.
-	MediaTypeJSON = "application/json"
-)
-
-// IsAttestationMediaType reports if content of a media type is an attestation
-// that can be parsed as it is: a sigstore bundle, a DSSE envelope or an
-// in-toto statement. Content of any other type, or of none, has to be
-// reassembled into the attestation it was kept for.
-func IsAttestationMediaType(mediaType string) bool {
-	return mediaType == MediaTypeDSSE || mediaType == MediaTypeInToto ||
-		strings.HasPrefix(mediaType, MediaTypeBundle)
+// MediaTypeReader is implemented by the envelope parsers that say which media
+// types they read. The parsers of this module all do.
+type MediaTypeReader interface {
+	ReadsMediaType(mediaType string) bool
 }
 
-// contentMediaType returns the media type of the data an envelope was parsed
-// from, empty when it cannot tell.
-func contentMediaType(env attestation.Envelope, data []byte) string {
-	switch e := env.(type) {
-	case *bundle.Envelope:
-		if mt := e.GetMediaType(); mt != "" {
-			return mt
-		}
-		return string(FormatBundleV3)
-	case *dsse.Envelope:
-		return MediaTypeDSSE
-	case *bare.Envelope:
-		// The bare parser reads statements and wraps anything else in one.
-		// Asking the statement parsers, as it does, is the only way to tell
-		// them apart: they take statements a look at the data would miss.
-		if _, err := statement.Parsers.Parse(data); err == nil {
-			return MediaTypeInToto
-		}
-		if json.Valid(data) {
-			return MediaTypeJSON
+// ForMediaType returns the parser that reads data of a media type, nil when
+// there is none. The parsers in the list are asked first, then the bare
+// parser, which reads unsigned statements.
+//
+// It is how the content kept in the origin of an attestation is read back.
+// Content a parser reads is the attestation itself and parses again into
+// what was evaluated. Content no parser reads, or of no type, is the
+// material an attestation was built from: reading it back means
+// reassembling the attestation as the repository that kept it did.
+func (list *ParserList) ForMediaType(mediaType string) attestation.EnvelopeParser {
+	if mediaType == "" {
+		return nil
+	}
+	for _, parser := range *list {
+		if r, ok := parser.(MediaTypeReader); ok && r.ReadsMediaType(mediaType) {
+			return parser
 		}
 	}
-	return ""
+	if b := bare.New(); b.ReadsMediaType(mediaType) {
+		return b
+	}
+	return nil
+}
+
+// IsAttestationMediaType reports if content of a media type is an attestation
+// that can be parsed as it is: one of the envelope parsers reads it.
+func IsAttestationMediaType(mediaType string) bool {
+	return Parsers.ForMediaType(mediaType) != nil
 }
 
 // KeepContent records data, the bytes an envelope was parsed from, as the
-// content of the origin of its predicate. Repositories call it when asked to
-// through the KeepContent fetch option, so that a consumer can carry the
-// evidence it evaluated along with its results.
+// content of the origin of its predicate, with its media type. Repositories
+// call it when asked to through the KeepContent fetch option, so that a
+// consumer can carry the evidence it evaluated along with its results.
 //
 // The content is only kept when data produced exactly one envelope and the
 // parser recorded its origin as a resource descriptor: that is when the
 // origin's digest is the digest of data. Anything else is left untouched.
 //
-// The media type of the data is recorded with it (see the MediaType
-// constants).
+// What is kept is always something an envelope parser reads back. Data that
+// was not an attestation, a predicate the bare parser wrapped in a statement
+// (an SBOM, a scanner report), is kept as that statement and not as it was
+// read (see KeepStatement).
 func KeepContent(envs []attestation.Envelope, data []byte) {
 	if len(envs) != 1 || envs[0] == nil || len(data) == 0 {
 		return
@@ -99,8 +82,68 @@ func KeepContent(envs []attestation.Envelope, data []byte) {
 	if !ok || rd == nil {
 		return
 	}
+
+	switch e := envs[0].(type) {
+	case *bundle.Envelope:
+		rd.Content = data
+		// A bundle records the media type it declares
+		rd.MediaType = e.GetMediaType()
+		if rd.GetMediaType() == "" {
+			rd.MediaType = string(FormatBundleV3)
+		}
+	case *dsse.Envelope:
+		rd.Content = data
+		rd.MediaType = dsse.MediaType
+	case *bare.Envelope:
+		// The bare parser reads statements and wraps anything else in one.
+		// Asking the statement parsers, as it does, is the only way to tell
+		// them apart: they take statements a look at the data would miss.
+		if _, err := statement.Parsers.Parse(data); err == nil {
+			rd.Content = data
+			rd.MediaType = bare.MediaType
+			return
+		}
+		if err := KeepStatement(envs[0]); err != nil {
+			logrus.Debugf("not keeping the content of an attestation: %v", err)
+		}
+	}
+}
+
+// KeepStatement records the statement of an unsigned attestation, as it
+// serializes, as the content of the origin of its predicate.
+//
+// It is how a repository keeps an attestation it built itself around data
+// that was not one: an SBOM attached to an image, a report read from a file.
+// The statement is unsigned, so nothing is lost by keeping it in place of the
+// data it wraps, and it reads back as it is, subjects included, where the
+// data alone would have to be wrapped again by the same repository.
+//
+// The digest of the origin becomes the digest of the statement kept, no
+// longer that of the data that was read. Its name and URI are left as they
+// were: they still say where the data came from.
+func KeepStatement(env attestation.Envelope) error {
+	if env == nil || env.GetStatement() == nil || env.GetPredicate() == nil {
+		return errors.New("attestation has no statement to keep")
+	}
+	data, err := json.Marshal(env.GetStatement())
+	if err != nil {
+		return fmt.Errorf("serializing statement: %w", err)
+	}
+	digests, err := hasher.New().HashReaders([]io.Reader{bytes.NewReader(data)})
+	if err != nil || len(*digests) == 0 {
+		return fmt.Errorf("hashing statement: %w", err)
+	}
+	kept := digests.ToResourceDescriptors()[0]
+
+	rd, ok := env.GetPredicate().GetOrigin().(*intoto.ResourceDescriptor)
+	if !ok || rd == nil {
+		rd = &intoto.ResourceDescriptor{}
+		env.GetPredicate().SetOrigin(rd)
+	}
+	rd.Digest = kept.GetDigest()
 	rd.Content = data
-	rd.MediaType = contentMediaType(envs[0], data)
+	rd.MediaType = bare.MediaType
+	return nil
 }
 
 // OriginContent returns the content kept in the origin of a predicate, nil

@@ -178,16 +178,26 @@ func TestFetchSBOMLayersKeepContent(t *testing.T) {
 	require.Len(t, atts, 1)
 	require.Nil(t, envelope.OriginContent(atts[0].GetPredicate()), "content is not kept unless asked")
 
-	// The SBOM is kept as it was read from its layer
+	// The SBOM is not an attestation: what is kept is the statement built
+	// around it, which an envelope parser reads back, image subject and all.
 	atts, err = c.Fetch(ctx, attestation.FetchOptions{KeepContent: true})
 	require.NoError(t, err)
 	require.Len(t, atts, 1)
-	require.True(t, bytes.Equal([]byte(testSPDXDocument), requireKeptContent(t, atts[0])), "kept content differs from the layer")
+	content := requireKeptContent(t, atts[0])
 
-	// An SBOM is not an attestation: its media type is the layer's
 	rd, ok := atts[0].GetPredicate().GetOrigin().(*gointoto.ResourceDescriptor)
 	require.True(t, ok)
-	layerType := spdxJSONMediaType
-	require.Equal(t, layerType, rd.GetMediaType())
-	require.False(t, envelope.IsAttestationMediaType(rd.GetMediaType()))
+	require.True(t, strings.HasPrefix(rd.GetUri(), "oci:"), rd.GetUri())
+
+	parser := envelope.Parsers.ForMediaType(rd.GetMediaType())
+	require.NotNil(t, parser, rd.GetMediaType())
+	again, err := parser.ParseStream(bytes.NewReader(content))
+	require.NoError(t, err)
+	require.Len(t, again, 1)
+	require.Equal(t, atts[0].GetPredicate().GetType(), again[0].GetPredicate().GetType())
+	require.JSONEq(t, testSPDXDocument, string(again[0].GetPredicate().GetData()))
+
+	subjects := again[0].GetStatement().GetSubjects()
+	require.Len(t, subjects, 1)
+	require.Equal(t, strings.TrimPrefix(digest, "sha256:"), subjects[0].GetDigest()["sha256"])
 }

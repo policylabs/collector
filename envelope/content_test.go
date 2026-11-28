@@ -14,6 +14,10 @@ import (
 	intoto "github.com/in-toto/attestation/go/v1"
 	"github.com/policylabs/attestation"
 	"github.com/stretchr/testify/require"
+
+	"github.com/policylabs/collector/envelope/bare"
+	"github.com/policylabs/collector/envelope/bundle"
+	"github.com/policylabs/collector/envelope/dsse"
 )
 
 // fixtureBundleMediaType is the media type bundle-provenance.json declares.
@@ -110,23 +114,19 @@ func TestKeepContentMediaType(t *testing.T) {
 	require.NoError(t, err)
 
 	for _, tc := range []struct {
-		name        string
-		data        []byte
-		mediaType   string
-		attestation bool
+		name      string
+		data      []byte
+		mediaType string
 	}{
-		{"bundle", bundleData, fixtureBundleMediaType, true},
+		{"bundle", bundleData, fixtureBundleMediaType},
 		{
 			"dsse",
 			[]byte(`{"payloadType":"application/vnd.in-toto+json","payload":"` +
 				base64.StdEncoding.EncodeToString(statementData) +
 				`","signatures":[{"keyid":"","sig":"c2ln"}]}`),
-			MediaTypeDSSE, true,
+			dsse.MediaType,
 		},
-		{"statement", statementData, MediaTypeInToto, true},
-		// Not an attestation: the parser wraps the data in a statement, so
-		// reading the content back means doing that again.
-		{"predicate", []byte(`{"some":"report"}`), MediaTypeJSON, false},
+		{"statement", statementData, bare.MediaType},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -134,26 +134,72 @@ func TestKeepContentMediaType(t *testing.T) {
 			require.NoError(t, err)
 			require.Len(t, envs, 1)
 
+			// An attestation is kept as it was read
 			KeepContent(envs, tc.data)
 			require.Equal(t, tc.data, OriginContent(envs[0].GetPredicate()))
 			mediaType := originMediaType(t, envs[0])
 			require.Equal(t, tc.mediaType, mediaType)
-			require.Equal(t, tc.attestation, IsAttestationMediaType(mediaType))
+
+			// ... and the parser of its media type reads it back
+			parser := Parsers.ForMediaType(mediaType)
+			require.NotNil(t, parser)
+			again, err := parser.ParseStream(bytes.NewReader(OriginContent(envs[0].GetPredicate())))
+			require.NoError(t, err)
+			require.Len(t, again, 1)
+			require.Equal(t, envs[0].GetPredicate().GetType(), again[0].GetPredicate().GetType())
+			require.JSONEq(t, string(envs[0].GetPredicate().GetData()), string(again[0].GetPredicate().GetData()))
 		})
 	}
 }
 
-func TestIsAttestationMediaType(t *testing.T) {
+// Data that is not an attestation is kept as the statement the parser
+// wrapped it in, which reads back as it is.
+func TestKeepContentWrappedPredicate(t *testing.T) {
 	t.Parallel()
-	for mediaType, expect := range map[string]bool{
-		"application/vnd.dev.sigstore.bundle.v0.3+json":        true,
-		"application/vnd.dev.sigstore.bundle+json;version=0.1": true,
-		MediaTypeDSSE:    true,
-		MediaTypeInToto:  true,
-		MediaTypeJSON:    false,
-		"text/spdx+json": false,
-		"":               false,
+	data := []byte(`{"some":"report","findings":[1,2,3]}`)
+
+	envs, err := Parsers.Parse(bytes.NewReader(data))
+	require.NoError(t, err)
+	require.Len(t, envs, 1)
+	read := envs[0].GetPredicate().GetOrigin().GetDigest()["sha256"]
+
+	KeepContent(envs, data)
+	content := OriginContent(envs[0].GetPredicate())
+	require.NotEmpty(t, content)
+	require.NotEqual(t, data, content)
+	require.Equal(t, bare.MediaType, originMediaType(t, envs[0]))
+
+	// The digest of the origin is that of the statement kept, no longer
+	// that of the data that was read.
+	sum := sha256.Sum256(content)
+	kept := envs[0].GetPredicate().GetOrigin().GetDigest()["sha256"]
+	require.Equal(t, hex.EncodeToString(sum[:]), kept)
+	require.NotEqual(t, read, kept)
+
+	again, err := Parsers.ForMediaType(bare.MediaType).ParseStream(bytes.NewReader(content))
+	require.NoError(t, err)
+	require.Len(t, again, 1)
+	require.Equal(t, envs[0].GetPredicate().GetType(), again[0].GetPredicate().GetType())
+	require.JSONEq(t, string(data), string(again[0].GetPredicate().GetData()))
+}
+
+func TestForMediaType(t *testing.T) {
+	t.Parallel()
+	for mediaType, expect := range map[string]any{
+		"application/vnd.dev.sigstore.bundle.v0.3+json":        &bundle.Parser{},
+		"application/vnd.dev.sigstore.bundle+json;version=0.1": &bundle.Parser{},
+		dsse.MediaType:     &dsse.Parser{},
+		bare.MediaType:     &bare.Parser{},
+		"application/json": nil,
+		"text/spdx+json":   nil,
+		"":                 nil,
 	} {
-		require.Equal(t, expect, IsAttestationMediaType(mediaType), mediaType)
+		parser := Parsers.ForMediaType(mediaType)
+		require.Equal(t, expect != nil, IsAttestationMediaType(mediaType), mediaType)
+		if expect == nil {
+			require.Nil(t, parser, mediaType)
+			continue
+		}
+		require.IsType(t, expect, parser, mediaType)
 	}
 }
