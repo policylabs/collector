@@ -14,11 +14,15 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/storage/memory"
+	intoto "github.com/in-toto/attestation/go/v1"
+	"github.com/policylabs/attestation"
 	sapi "github.com/policylabs/signer/api/v1"
 	"github.com/policylabs/signer/key"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/policylabs/collector/predicate/git"
+	"github.com/policylabs/collector/repository"
 )
 
 const (
@@ -159,4 +163,76 @@ func TestBuiltinKeysAreGitHubs(t *testing.T) {
 		require.Contains(t, pub.UserIDs()[0], "noreply@github.com")
 	}
 	require.Empty(t, NewVerifier().Keys(), "built-in keys are not among the configured ones")
+}
+
+// A signed object is kept with its signature: rebuilt with the key, the
+// attestation is verified as it was, and without it nothing is established.
+func TestReassembleSigned(t *testing.T) {
+	t.Parallel()
+	priv, err := key.NewGenerator().GenerateGPGKeyPair()
+	require.NoError(t, err)
+	keys := []key.PublicKeyProvider{priv.GPGPublicKey()}
+	repo, commit, tag := newRepo(t, priv)
+	s := New(WithKeys(keys...))
+
+	for _, tc := range []struct {
+		name    string
+		objType plumbing.ObjectType
+		hash    plumbing.Hash
+		build   func() (attestation.Envelope, error)
+	}{
+		{"commit", plumbing.CommitObject, commit, func() (attestation.Envelope, error) { return s.Commit(t.Context(), repo, commit) }},
+		{"tag", plumbing.TagObject, tag, func() (attestation.Envelope, error) { return s.Tag(t.Context(), repo, tag) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			built, err := tc.build()
+			require.NoError(t, err)
+			require.True(t, built.GetVerification().GetVerified())
+
+			origin, err := s.Origin(repo, tc.objType, tc.hash, "git")
+			require.NoError(t, err)
+			require.Equal(t, "git+https://github.com/example/repo@"+tc.hash.String(), origin.GetUri())
+
+			// WithOrigin leaves the attestation it copies alone
+			original, err := WithOrigin(built, origin)
+			require.NoError(t, err)
+			require.Nil(t, built.GetPredicate().GetOrigin())
+			require.Same(t, origin, original.GetPredicate().GetOrigin())
+			require.True(t, original.GetVerification().GetVerified())
+
+			rebuilt, err := Reassemble(t.Context(), origin, repository.ReassembleOptions{Keys: keys})
+			require.NoError(t, err)
+			require.Len(t, rebuilt, 1)
+			require.JSONEq(t, string(original.GetPredicate().GetData()), string(rebuilt[0].GetPredicate().GetData()))
+			require.Equal(t, original.GetStatement().GetSubjects()[0].GetName(), rebuilt[0].GetStatement().GetSubjects()[0].GetName())
+			require.True(t, rebuilt[0].GetVerification().GetVerified())
+
+			rebuilt, err = Reassemble(t.Context(), origin, repository.ReassembleOptions{})
+			require.NoError(t, err)
+			require.Nil(t, rebuilt[0].GetVerification())
+		})
+	}
+}
+
+func TestRestoreObjectErrors(t *testing.T) {
+	t.Parallel()
+	repo, commit, _ := newRepo(t, nil)
+	origin, err := ObjectOrigin(repo, plumbing.CommitObject, commit, "git", "origin", nil)
+	require.NoError(t, err)
+
+	_, err = ObjectOrigin(repo, plumbing.BlobObject, commit, "git", "origin", nil)
+	require.ErrorContains(t, err, "not a commit or tag")
+
+	_, err = RestoreObject(&intoto.ResourceDescriptor{Content: origin.GetContent()})
+	require.ErrorContains(t, err, "no reassembly material")
+
+	tampered, ok := proto.Clone(origin).(*intoto.ResourceDescriptor)
+	require.True(t, ok)
+	tampered.Content = append(tampered.Content, '\n')
+	_, err = RestoreObject(tampered)
+	require.ErrorContains(t, err, "as its origin says")
+
+	_, err = WithOrigin(nil, origin)
+	require.Error(t, err)
 }

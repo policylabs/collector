@@ -24,6 +24,7 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 
 	"github.com/policylabs/collector/envelope"
+	"github.com/policylabs/collector/gitobject"
 	"github.com/policylabs/collector/repository"
 )
 
@@ -160,7 +161,7 @@ func TestReassembleErrors(t *testing.T) {
 	t.Run("not-a-commit-or-tag", func(t *testing.T) {
 		t.Parallel()
 		origin := &intoto.ResourceDescriptor{Content: kept.GetContent()}
-		require.NoError(t, repository.Annotate(origin, TypeMoniker, map[string]any{materialObject: "blob"}))
+		require.NoError(t, repository.Annotate(origin, TypeMoniker, map[string]any{gitobject.MaterialObject: "blob"}))
 		_, err := Reassemble(t.Context(), origin, repository.ReassembleOptions{})
 		require.ErrorContains(t, err, "no commit or tag")
 	})
@@ -177,7 +178,7 @@ func TestReassembleErrors(t *testing.T) {
 		t.Parallel()
 		origin := &intoto.ResourceDescriptor{Content: []byte("object 0000000000000000000000000000000000000000\ntype commit\ntag v1\n\nmsg\n")}
 		origin.Digest = map[string]string{"gitTag": gitObjectID("tag", origin.GetContent())}
-		require.NoError(t, repository.Annotate(origin, TypeMoniker, map[string]any{materialObject: "tag"}))
+		require.NoError(t, repository.Annotate(origin, TypeMoniker, map[string]any{gitobject.MaterialObject: "tag"}))
 		_, err := Reassemble(t.Context(), origin, repository.ReassembleOptions{})
 		require.ErrorContains(t, err, "names no tag")
 	})

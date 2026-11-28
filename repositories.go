@@ -110,6 +110,7 @@ func LoadDefaultRepositoryTypes() error {
 	// The repository types that keep content only they can read back
 	for t, reassembler := range map[string]repository.Reassembler{
 		coci.TypeMoniker:    coci.Reassemble,
+		git.TypeMoniker:     git.Reassemble,
 		gitsign.TypeMoniker: gitsign.Reassemble,
 		pypi.TypeMoniker:    pypi.Reassemble,
 	} {
