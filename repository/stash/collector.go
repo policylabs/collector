@@ -255,6 +255,9 @@ func (c *Collector) query(ctx context.Context, opts attestation.FetchOptions, fi
 		if err != nil {
 			return nil, fmt.Errorf("parsing attestation %s: %w", id, err)
 		}
+		if opts.KeepContent {
+			envelope.KeepContent(envs, raw)
+		}
 		envelopes = append(envelopes, envs...)
 	}
 	if opts.Limit > 0 && len(envelopes) > opts.Limit {

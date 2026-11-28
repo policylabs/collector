@@ -361,7 +361,7 @@ func (c *Collector) fetchJSONLAttestations(ctx context.Context, agent *http.Agen
 		return nil, fmt.Errorf("JSONL file %s exceeds max read size (%d bytes)", filename, maxSize)
 	}
 
-	return envelope.NewJSONL().Parse(data)
+	return (&envelope.JsonlParser{KeepContent: opts.KeepContent}).Parse(data)
 }
 
 // sbomExtensions lists the metadata extensions we recognize as SBOMs,
@@ -400,6 +400,9 @@ func (c *Collector) fetchSBOMs(ctx context.Context, agent *http.Agent, dirURL, a
 		envs, err := envelope.Parsers.Parse(bytes.NewReader(data))
 		if err != nil {
 			return nil, fmt.Errorf("parsing SBOM %s: %w", filename, err)
+		}
+		if opts.KeepContent {
+			envelope.KeepContent(envs, data)
 		}
 
 		ret = append(ret, envs...)

@@ -17,7 +17,11 @@ var _ attestation.EnvelopeParser = (*JsonlParser)(nil)
 
 // JsonlParser is a virtual parser that splits the jsonl files into the contained
 // JSON structs and calls the configured envelope parsers for each instance.
-type JsonlParser struct{}
+type JsonlParser struct {
+	// KeepContent keeps the data of each attestation in the content of its
+	// origin (see KeepContent).
+	KeepContent bool
+}
 
 func NewJSONL() *JsonlParser {
 	return &JsonlParser{}
@@ -33,9 +37,16 @@ func (jlp *JsonlParser) ParseStream(jsonlStream io.Reader) ([]attestation.Envelo
 		if r == nil {
 			continue
 		}
-		att, err := Parsers.Parse(r)
+		data, err := io.ReadAll(r)
+		if err != nil {
+			return nil, fmt.Errorf("error reading struct #%d: %w", i, err)
+		}
+		att, err := Parsers.Parse(bytes.NewReader(data))
 		if err != nil {
 			return nil, fmt.Errorf("error parsing struct #%d: %w", i, err)
+		}
+		if jlp.KeepContent {
+			KeepContent(att, data)
 		}
 		ret = append(ret, att...)
 	}

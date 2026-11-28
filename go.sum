@@ -454,8 +454,8 @@ github.com/planetscale/vtprotobuf v0.6.1-0.20240319094008-0393e58bdf10/go.mod h1
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 h1:Jamvg5psRIccs7FGNTlIRMkT8wgtp5eCXdBlqhYGL6U=
 github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
-github.com/policylabs/attestation v0.3.0 h1:tutwsvbq/T5F0Hwt8+M4u42Egk1qP8YbNx4GQ1hnTTA=
-github.com/policylabs/attestation v0.3.0/go.mod h1:z5gJ2M2aAkByYxMLqoOIY31KvAOIX+Ys4ZW2HavM3/o=
+github.com/policylabs/attestation v0.3.1-0.20261128004528-b7a004636137 h1:yh92Q8iQHSN5x97Kp3ppnYK0t5irQPJNAiTVd0EUprk=
+github.com/policylabs/attestation v0.3.1-0.20261128004528-b7a004636137/go.mod h1:z5gJ2M2aAkByYxMLqoOIY31KvAOIX+Ys4ZW2HavM3/o=
 github.com/policylabs/policy v0.6.0 h1:NUMtcAH3tC123HHZmXK8H2Xo6izaNovwF3XnHbskIKg=
 github.com/policylabs/policy v0.6.0/go.mod h1:a+8uNqhkyYL2EJsJlHFrUwAMt3iqb4jgjeWhIkQEeS0=
 github.com/policylabs/predicates v0.6.0 h1:PgM9/8X8p/i4+Mr+VkijTb2ukeykrHmmjBnk1GuSq+M=

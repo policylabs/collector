@@ -46,6 +46,11 @@ func (p *Parser) ParseStream(r io.Reader) ([]attestation.Envelope, error) {
 	// json data is an attestation.
 	s, err := statement.Parsers.Parse(data)
 	if err == nil {
+		// Register the attestation digests in its source, as when the
+		// statement is synthesized below.
+		if s.GetPredicate() != nil {
+			s.GetPredicate().SetOrigin(digests.ToResourceDescriptors()[0])
+		}
 		env.Statement = s
 		return []attestation.Envelope{env}, nil
 	}

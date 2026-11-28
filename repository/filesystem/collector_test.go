@@ -12,6 +12,7 @@ import (
 	"github.com/policylabs/attestation"
 	"github.com/stretchr/testify/require"
 
+	"github.com/policylabs/collector/envelope"
 	"github.com/policylabs/collector/filters"
 )
 
@@ -129,4 +130,26 @@ func TestFetchStopsWalkOnCancelledContext(t *testing.T) {
 	envs, err := collector.Fetch(ctx, attestation.FetchOptions{})
 	require.ErrorIs(t, err, context.Canceled)
 	require.Empty(t, envs)
+}
+
+func TestFetchKeepContent(t *testing.T) {
+	t.Parallel()
+
+	data, err := os.ReadFile("testdata/results.intoto.json")
+	require.NoError(t, err)
+
+	collector, err := New(WithFS(fstest.MapFS{
+		"results.intoto.json": &fstest.MapFile{Data: data},
+	}))
+	require.NoError(t, err)
+
+	atts, err := collector.Fetch(t.Context(), attestation.FetchOptions{})
+	require.NoError(t, err)
+	require.Len(t, atts, 1)
+	require.Nil(t, envelope.OriginContent(atts[0].GetPredicate()), "content is not kept unless asked")
+
+	atts, err = collector.Fetch(t.Context(), attestation.FetchOptions{KeepContent: true})
+	require.NoError(t, err)
+	require.Len(t, atts, 1)
+	require.Equal(t, data, envelope.OriginContent(atts[0].GetPredicate()))
 }

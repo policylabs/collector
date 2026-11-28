@@ -19,6 +19,7 @@ import (
 	"github.com/regclient/regclient/types/ref"
 	"github.com/sirupsen/logrus"
 
+	"github.com/policylabs/collector/envelope"
 	"github.com/policylabs/collector/envelope/bundle"
 	"github.com/policylabs/collector/internal/readlimit"
 	"github.com/policylabs/collector/repository"
@@ -283,6 +284,9 @@ func (c *Collector) fetchReferrer(
 		if err != nil {
 			logrus.Debugf("oci: skipping layer %d: parsing bundle: %v", j, err)
 			continue
+		}
+		if opts.KeepContent {
+			envelope.KeepContent(envs, data)
 		}
 
 		atts = append(atts, envs...)

@@ -179,7 +179,7 @@ require (
 	github.com/pjbgf/sha1cd v0.7.0 // indirect
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect
 	github.com/pkg/errors v0.9.1 // indirect
-	github.com/policylabs/attestation v0.3.0
+	github.com/policylabs/attestation v0.3.1-0.20261128004528-b7a004636137
 	github.com/policylabs/policy v0.6.0 // indirect
 	github.com/ryanuber/go-glob v1.0.0 // indirect
 	github.com/sassoftware/relic/v8 v8.2.0 // indirect

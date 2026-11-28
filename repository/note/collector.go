@@ -118,7 +118,11 @@ func (c *Collector) Fetch(ctx context.Context, opts attestation.FetchOptions) ([
 		}
 
 		// Parse the JSON doc
-		envelopes, err := envelope.Parsers.Parse(r)
+		data, err := io.ReadAll(r)
+		if err != nil {
+			return nil, fmt.Errorf("reading attestation %d: %w", i, err)
+		}
+		envelopes, err := envelope.Parsers.Parse(bytes.NewReader(data))
 		if err != nil {
 			return nil, fmt.Errorf("parsing attestation %d in %q: %w", i, c.Options.Locator, err)
 		}
@@ -137,6 +141,9 @@ func (c *Collector) Fetch(ctx context.Context, opts attestation.FetchOptions) ([
 				Name:   fmt.Sprintf("jsonl:%s#%d", c.Options.Locator, i),
 				Uri:    fmt.Sprintf("jsonl:%s#%d", c.Options.Locator, i),
 				Digest: envelopes[0].GetStatement().GetPredicate().GetOrigin().GetDigest(),
+			}
+			if opts.KeepContent {
+				rd.Content = data
 			}
 			envelopes[0].GetStatement().GetPredicate().SetOrigin(rd)
 		}

@@ -6,8 +6,10 @@
 package jsonl
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"sync"
 
@@ -93,7 +95,11 @@ func parseJsonlFile(opts *attestation.FetchOptions, path string, filterset *atte
 		}
 
 		// Parse the JSON doc
-		envelopes, err := envelope.Parsers.Parse(r)
+		data, err := io.ReadAll(r)
+		if err != nil {
+			return nil, fmt.Errorf("reading attestation %d: %w", i, err)
+		}
+		envelopes, err := envelope.Parsers.Parse(bytes.NewReader(data))
 		if err != nil {
 			return nil, fmt.Errorf("parsing attestation %d in %q: %w", i, path, err)
 		}
@@ -112,6 +118,9 @@ func parseJsonlFile(opts *attestation.FetchOptions, path string, filterset *atte
 				Name:   fmt.Sprintf("jsonl:%s#%d", path, i),
 				Uri:    fmt.Sprintf("jsonl:%s#%d", path, i),
 				Digest: envelopes[0].GetStatement().GetPredicate().GetOrigin().GetDigest(),
+			}
+			if opts.KeepContent {
+				rd.Content = data
 			}
 			envelopes[0].GetStatement().GetPredicate().SetOrigin(rd)
 		}

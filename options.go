@@ -100,6 +100,14 @@ func WithLimit(n int) FetchOptionsFunc {
 	}
 }
 
+// WithKeepContent asks the repositories to keep the data of each attestation,
+// as it was read, in the content of its predicate's origin.
+func WithKeepContent(keep bool) FetchOptionsFunc {
+	return func(o *attestation.FetchOptions) {
+		o.KeepContent = keep
+	}
+}
+
 // WithKeys registers verification keys at the agent level. Before each fetch,
 // the agent distributes these keys to any repository that implements repository.SignatureVerifier.
 func WithKeys(keys ...key.PublicKeyProvider) InitFunction {
