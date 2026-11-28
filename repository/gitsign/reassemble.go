@@ -99,9 +99,9 @@ func (c *Collector) keepObject(repo *gogit.Repository, env attestation.Envelope,
 // The signature of the object is verified again, which is what gives the
 // attestation its verification. A sigstore signature that does not embed its
 // transparency log entry is looked up in the public log, as when first read;
-// a signature made with a key only verifies against the built-in keys, as
-// none can be configured here.
-func Reassemble(ctx context.Context, origin *intoto.ResourceDescriptor) ([]attestation.Envelope, error) {
+// a signature made with a key verifies against the keys in the options and
+// the built-in ones.
+func Reassemble(ctx context.Context, origin *intoto.ResourceDescriptor, opts repository.ReassembleOptions) ([]attestation.Envelope, error) {
 	material := repository.Material(origin)
 	if material == nil {
 		return nil, errors.New("origin has no reassembly material")
@@ -155,8 +155,10 @@ func Reassemble(ctx context.Context, origin *intoto.ResourceDescriptor) ([]attes
 
 	c := &Collector{
 		Options:  Options{Remote: remote, RekorURL: defaultRekorURL},
+		Keys:     opts.Keys,
 		verifier: gitobject.NewVerifier(gitobject.WithRekorURL(defaultRekorURL)),
 	}
+	c.verifier.SetKeys(opts.Keys)
 
 	var env attestation.Envelope
 	if objType == plumbing.TagObject {

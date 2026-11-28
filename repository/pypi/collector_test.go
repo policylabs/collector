@@ -448,7 +448,7 @@ func TestReassemble(t *testing.T) {
 	origin := &gointoto.ResourceDescriptor{}
 	require.NoError(t, protojson.Unmarshal(data, origin))
 
-	rebuilt, err := Reassemble(t.Context(), origin)
+	rebuilt, err := Reassemble(t.Context(), origin, repository.ReassembleOptions{})
 	require.NoError(t, err)
 	require.Len(t, rebuilt, 1)
 	env := rebuilt[0]
@@ -494,19 +494,19 @@ func TestReassembleErrors(t *testing.T) {
 
 	t.Run("not-a-bundle", func(t *testing.T) {
 		t.Parallel()
-		_, err := Reassemble(t.Context(), &gointoto.ResourceDescriptor{Content: []byte("not a bundle")})
+		_, err := Reassemble(t.Context(), &gointoto.ResourceDescriptor{Content: []byte("not a bundle")}, repository.ReassembleOptions{})
 		require.Error(t, err)
 	})
 	t.Run("no-material", func(t *testing.T) {
 		t.Parallel()
-		_, err := Reassemble(t.Context(), &gointoto.ResourceDescriptor{Content: kept.GetContent()})
+		_, err := Reassemble(t.Context(), &gointoto.ResourceDescriptor{Content: kept.GetContent()}, repository.ReassembleOptions{})
 		require.ErrorContains(t, err, "no reassembly material")
 	})
 	t.Run("no-distribution", func(t *testing.T) {
 		t.Parallel()
 		origin := &gointoto.ResourceDescriptor{Content: kept.GetContent()}
 		require.NoError(t, repository.Annotate(origin, TypeMoniker, map[string]any{}))
-		_, err := Reassemble(t.Context(), origin)
+		_, err := Reassemble(t.Context(), origin, repository.ReassembleOptions{})
 		require.ErrorContains(t, err, "no distribution file")
 	})
 }

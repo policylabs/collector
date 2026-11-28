@@ -7,6 +7,8 @@ import (
 	"crypto/sha1" //nolint:gosec // git object ids are sha1
 	"encoding/hex"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/carabiner-dev/vcslocator"
@@ -16,6 +18,8 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/object"
 	intoto "github.com/in-toto/attestation/go/v1"
 	"github.com/policylabs/attestation"
+	sapi "github.com/policylabs/signer/api/v1"
+	"github.com/policylabs/signer/key"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/encoding/protojson"
 
@@ -91,7 +95,7 @@ func TestReassembleCommit(t *testing.T) {
 	require.Nil(t, envelope.Parsers.ForMediaType(origin.GetMediaType()))
 	require.Equal(t, TypeMoniker, repository.Annotated(origin))
 
-	rebuilt, err := Reassemble(t.Context(), origin)
+	rebuilt, err := Reassemble(t.Context(), origin, repository.ReassembleOptions{})
 	require.NoError(t, err)
 	require.Len(t, rebuilt, 1)
 	requireSameStatement(t, original, rebuilt[0])
@@ -132,7 +136,7 @@ func TestReassembleTag(t *testing.T) {
 	require.Equal(t, map[string]string{"gitTag": tagHash}, origin.GetDigest())
 	require.Equal(t, tagHash, gitObjectID("tag", origin.GetContent()))
 
-	rebuilt, err := Reassemble(t.Context(), origin)
+	rebuilt, err := Reassemble(t.Context(), origin, repository.ReassembleOptions{})
 	require.NoError(t, err)
 	require.Len(t, rebuilt, 1)
 	requireSameStatement(t, original, rebuilt[0])
@@ -150,14 +154,14 @@ func TestReassembleErrors(t *testing.T) {
 
 	t.Run("no-material", func(t *testing.T) {
 		t.Parallel()
-		_, err := Reassemble(t.Context(), &intoto.ResourceDescriptor{Content: kept.GetContent()})
+		_, err := Reassemble(t.Context(), &intoto.ResourceDescriptor{Content: kept.GetContent()}, repository.ReassembleOptions{})
 		require.ErrorContains(t, err, "no reassembly material")
 	})
 	t.Run("not-a-commit-or-tag", func(t *testing.T) {
 		t.Parallel()
 		origin := &intoto.ResourceDescriptor{Content: kept.GetContent()}
 		require.NoError(t, repository.Annotate(origin, TypeMoniker, map[string]any{materialObject: "blob"}))
-		_, err := Reassemble(t.Context(), origin)
+		_, err := Reassemble(t.Context(), origin, repository.ReassembleOptions{})
 		require.ErrorContains(t, err, "no commit or tag")
 	})
 	// Content that is not the object the origin says it is, is refused
@@ -166,7 +170,7 @@ func TestReassembleErrors(t *testing.T) {
 		origin := travelled(t, envs[0])
 		origin.Content = append([]byte{}, origin.GetContent()...)
 		origin.Content = append(origin.Content, '\n')
-		_, err := Reassemble(t.Context(), origin)
+		_, err := Reassemble(t.Context(), origin, repository.ReassembleOptions{})
 		require.ErrorContains(t, err, "as its origin says")
 	})
 	t.Run("tag-without-name", func(t *testing.T) {
@@ -174,7 +178,64 @@ func TestReassembleErrors(t *testing.T) {
 		origin := &intoto.ResourceDescriptor{Content: []byte("object 0000000000000000000000000000000000000000\ntype commit\ntag v1\n\nmsg\n")}
 		origin.Digest = map[string]string{"gitTag": gitObjectID("tag", origin.GetContent())}
 		require.NoError(t, repository.Annotate(origin, TypeMoniker, map[string]any{materialObject: "tag"}))
-		_, err := Reassemble(t.Context(), origin)
+		_, err := Reassemble(t.Context(), origin, repository.ReassembleOptions{})
 		require.ErrorContains(t, err, "names no tag")
 	})
+}
+
+// A commit signed with a key verifies again when the key comes in the
+// options, as it did when the repository was configured with it.
+func TestReassembleKeySigned(t *testing.T) {
+	t.Parallel()
+	priv, err := key.NewGenerator().GenerateGPGKeyPair()
+	require.NoError(t, err)
+	keys := []key.PublicKeyProvider{priv.GPGPublicKey()}
+
+	repoPath := filepath.Join(t.TempDir(), "signed-repo")
+	repo, err := gogit.PlainInit(repoPath, false)
+	require.NoError(t, err)
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(repoPath, "file.txt"), []byte("content"), 0o600))
+	_, err = wt.Add("file.txt")
+	require.NoError(t, err)
+	hash, err := wt.Commit("Signed commit", &gogit.CommitOptions{
+		Author:  &object.Signature{Name: testName, Email: testEmail},
+		SignKey: priv.Entity(),
+	})
+	require.NoError(t, err)
+
+	c, err := New(WithInitString(string(vcslocator.NewFromPath(repoPath))+"@"+hash.String()), WithKeys(keys...))
+	require.NoError(t, err)
+	envs, err := c.Fetch(t.Context(), attestation.FetchOptions{KeepContent: true})
+	require.NoError(t, err)
+	require.Len(t, envs, 1)
+	original := envs[0]
+	require.NotNil(t, original.GetVerification())
+	require.True(t, original.GetVerification().GetVerified())
+	origin := travelled(t, original)
+
+	identity := func(e attestation.Envelope) string {
+		sv, ok := e.GetVerification().(*sapi.Verification)
+		require.True(t, ok)
+		ids := sv.GetSignature().GetIdentities()
+		require.Len(t, ids, 1)
+		return ids[0].GetKey().GetId()
+	}
+
+	rebuilt, err := Reassemble(t.Context(), origin, repository.ReassembleOptions{Keys: keys})
+	require.NoError(t, err)
+	require.Len(t, rebuilt, 1)
+	requireSameStatement(t, original, rebuilt[0])
+	require.NotNil(t, rebuilt[0].GetVerification())
+	require.True(t, rebuilt[0].GetVerification().GetVerified())
+	require.Equal(t, identity(original), identity(rebuilt[0]))
+
+	// Without the key the attestation is rebuilt, but nothing is
+	// established about who signed the commit.
+	rebuilt, err = Reassemble(t.Context(), origin, repository.ReassembleOptions{})
+	require.NoError(t, err)
+	require.Len(t, rebuilt, 1)
+	requireSameStatement(t, original, rebuilt[0])
+	require.Nil(t, rebuilt[0].GetVerification())
 }

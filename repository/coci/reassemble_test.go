@@ -18,6 +18,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/types"
 	gointoto "github.com/in-toto/attestation/go/v1"
 	"github.com/policylabs/attestation"
+	"github.com/policylabs/signer/key"
 	protobundle "github.com/sigstore/protobuf-specs/gen/pb-go/bundle/v1"
 	protocommon "github.com/sigstore/protobuf-specs/gen/pb-go/common/v1"
 	protorekor "github.com/sigstore/protobuf-specs/gen/pb-go/rekor/v1"
@@ -54,7 +55,13 @@ func pushSignatureImage(t *testing.T, ctx context.Context, repo, digest string) 
 	})
 	require.NoError(t, err)
 	annotations["dev.cosignproject.cosign/signature"] = base64.StdEncoding.EncodeToString([]byte("signature"))
+	pushSignatureLayer(t, ctx, repo, digest, annotations)
+}
 
+// pushSignatureLayer attaches a cosign signature layer with the given
+// annotations to the image with the given digest.
+func pushSignatureLayer(t *testing.T, ctx context.Context, repo, digest string, annotations map[string]string) {
+	t.Helper()
 	img, err := mutate.Append(empty.Image, mutate.Addendum{
 		Layer:       static.NewLayer([]byte(testSignaturePayload), types.MediaType(cosignSimpleSigningMediaType)),
 		Annotations: annotations,
@@ -112,7 +119,7 @@ func TestReassembleSignature(t *testing.T) {
 	require.Equal(t, TypeMoniker, repository.Annotated(origin))
 	require.True(t, strings.HasPrefix(origin.GetUri(), "oci:"+repo+"@sha256:"), origin.GetUri())
 
-	rebuilt, err := Reassemble(ctx, origin)
+	rebuilt, err := Reassemble(ctx, origin, repository.ReassembleOptions{})
 	require.NoError(t, err)
 	require.Len(t, rebuilt, 1)
 	env, ok := rebuilt[0].(*bundle.Envelope)
@@ -134,19 +141,19 @@ func TestReassembleSignature(t *testing.T) {
 		tampered, ok := proto.Clone(origin).(*gointoto.ResourceDescriptor)
 		require.True(t, ok)
 		tampered.Content = append(tampered.Content, ' ')
-		_, err := Reassemble(ctx, tampered)
+		_, err := Reassemble(ctx, tampered, repository.ReassembleOptions{})
 		require.ErrorContains(t, err, "as its origin says")
 	})
 	t.Run("no-material", func(t *testing.T) {
 		t.Parallel()
-		_, err := Reassemble(ctx, &gointoto.ResourceDescriptor{Content: origin.GetContent(), Digest: origin.GetDigest()})
+		_, err := Reassemble(ctx, &gointoto.ResourceDescriptor{Content: origin.GetContent(), Digest: origin.GetDigest()}, repository.ReassembleOptions{})
 		require.ErrorContains(t, err, "no reassembly material")
 	})
 	t.Run("not-a-signature-layer", func(t *testing.T) {
 		t.Parallel()
 		other := &gointoto.ResourceDescriptor{Content: origin.GetContent(), Digest: origin.GetDigest()}
 		require.NoError(t, repository.Annotate(other, TypeMoniker, map[string]any{materialLayer: "sbom"}))
-		_, err := Reassemble(ctx, other)
+		_, err := Reassemble(ctx, other, repository.ReassembleOptions{})
 		require.ErrorContains(t, err, "not of a signature layer")
 	})
 	// A signature that only a configured key verified cannot be rebuilt:
@@ -159,7 +166,60 @@ func TestReassembleSignature(t *testing.T) {
 			materialAnnotations: map[string]any{"dev.cosignproject.cosign/signature": "c2ln"},
 			materialRepository:  "test", materialDigest: digest,
 		}))
-		_, err := Reassemble(ctx, other)
+		_, err := Reassemble(ctx, other, repository.ReassembleOptions{})
 		require.ErrorContains(t, err, "no verification method")
 	})
+}
+
+// A signature that only verifies against a configured key is rebuilt when
+// the key comes in the options.
+func TestReassembleKeySignature(t *testing.T) {
+	t.Parallel()
+	host := startTestRegistry(t)
+	ctx := t.Context()
+
+	priv, err := key.NewGenerator().GenerateKeyPair()
+	require.NoError(t, err)
+	pub, err := priv.PublicKey()
+	require.NoError(t, err)
+	keys := []key.PublicKeyProvider{pub}
+	sig, err := key.NewSigner().SignMessage(priv, []byte(testSignaturePayload))
+	require.NoError(t, err)
+
+	repo := fmt.Sprintf("%s/test/coci/key-signature", host)
+	digest := pushEmptySubject(t, ctx, repo+":v1")
+	pushSignatureLayer(t, ctx, repo, digest, map[string]string{
+		"dev.cosignproject.cosign/signature": base64.StdEncoding.EncodeToString(sig),
+	})
+
+	c, err := New(
+		WithReference(repo+":v1"), WithCraneOpts(crane.Insecure),
+		WithReadAttestations(false), WithReadSBOMs(false),
+	)
+	require.NoError(t, err)
+	c.SetKeys(keys)
+
+	atts, err := c.Fetch(ctx, attestation.FetchOptions{KeepContent: true})
+	require.NoError(t, err)
+	require.Len(t, atts, 1)
+	original := atts[0]
+	require.True(t, original.GetVerification().GetVerified())
+
+	kept, ok := original.GetPredicate().GetOrigin().(*gointoto.ResourceDescriptor)
+	require.True(t, ok)
+	data, err := protojson.Marshal(kept)
+	require.NoError(t, err)
+	origin := &gointoto.ResourceDescriptor{}
+	require.NoError(t, protojson.Unmarshal(data, origin))
+
+	rebuilt, err := Reassemble(ctx, origin, repository.ReassembleOptions{Keys: keys})
+	require.NoError(t, err)
+	require.Len(t, rebuilt, 1)
+	require.Equal(t, original.GetPredicate().GetData(), rebuilt[0].GetPredicate().GetData())
+	require.Equal(t, original.GetStatement().GetSubjects()[0].GetDigest(), rebuilt[0].GetStatement().GetSubjects()[0].GetDigest())
+	require.True(t, rebuilt[0].GetVerification().GetVerified())
+
+	// Without the key there is no way to verify the signature
+	_, err = Reassemble(ctx, origin, repository.ReassembleOptions{})
+	require.ErrorContains(t, err, "no verification method")
 }

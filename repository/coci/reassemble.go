@@ -78,9 +78,10 @@ func keepSignature(env attestation.Envelope, imageInfo *ImageInfo, layer *ggcr.D
 // from them as it was the first time.
 //
 // A signature that verifies with sigstore material comes back to be
-// verified, as when first read. One that only verified against a configured
-// key cannot be rebuilt: no keys can be configured here.
-func Reassemble(_ context.Context, origin *gointoto.ResourceDescriptor) ([]attestation.Envelope, error) {
+// verified, as when first read. One that only verifies against a key needs
+// that key in the options: without it there is no way to verify the
+// signature and the attestation is not rebuilt.
+func Reassemble(_ context.Context, origin *gointoto.ResourceDescriptor, opts repository.ReassembleOptions) ([]attestation.Envelope, error) {
 	material := repository.Material(origin)
 	if material == nil {
 		return nil, errors.New("origin has no reassembly material")
@@ -120,7 +121,7 @@ func Reassemble(_ context.Context, origin *gointoto.ResourceDescriptor) ([]attes
 		Digest:     str(materialDigest),
 	}
 
-	env, err := (&Collector{}).signatureEnvelope(imageInfo, layer, payload)
+	env, err := (&Collector{Keys: opts.Keys}).signatureEnvelope(imageInfo, layer, payload)
 	if err != nil {
 		return nil, err
 	}

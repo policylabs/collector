@@ -10,6 +10,7 @@ import (
 
 	intoto "github.com/in-toto/attestation/go/v1"
 	"github.com/policylabs/attestation"
+	"github.com/policylabs/signer/key"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
@@ -28,11 +29,23 @@ const (
 	AnnotationMaterial = "github.com/policylabs/collector/material"
 )
 
+// ReassembleOptions is what a reassembler takes besides the origin: what a
+// repository would have been configured with when it first read the
+// attestation, and that an origin does not record.
+type ReassembleOptions struct {
+	// Keys are the public keys to verify signatures with, for the
+	// attestations whose verification is established when they are built
+	// (the signature of a git object, a cosign signature made with a key).
+	// Without them such an attestation comes back unverified, or cannot be
+	// rebuilt at all.
+	Keys []key.PublicKeyProvider
+}
+
 // Reassembler rebuilds the attestations a repository type made out of the
 // content kept in an origin, from that content and the material recorded
 // with it. It gives back what the repository returned when it first read
-// them, not verified.
-type Reassembler func(ctx context.Context, origin *intoto.ResourceDescriptor) ([]attestation.Envelope, error)
+// them.
+type Reassembler func(ctx context.Context, origin *intoto.ResourceDescriptor, opts ReassembleOptions) ([]attestation.Envelope, error)
 
 // Annotate records in an origin the repository type that reassembles its
 // content and the material it needs to do it. Other annotations are kept.

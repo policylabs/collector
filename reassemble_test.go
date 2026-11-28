@@ -12,6 +12,7 @@ import (
 
 	intoto "github.com/in-toto/attestation/go/v1"
 	"github.com/policylabs/attestation"
+	"github.com/policylabs/signer/key"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/encoding/protojson"
 
@@ -55,7 +56,7 @@ func TestEnvelopesFromOriginParses(t *testing.T) {
 			require.NoError(t, err)
 			original, origin := keptOrigin(t, data)
 
-			envs, err := EnvelopesFromOrigin(t.Context(), origin)
+			envs, err := EnvelopesFromOrigin(t.Context(), origin, repository.ReassembleOptions{})
 			require.NoError(t, err)
 			require.Len(t, envs, 1)
 			require.Equal(t, original.GetPredicate().GetType(), envs[0].GetPredicate().GetType())
@@ -74,7 +75,7 @@ func TestEnvelopesFromOriginWrappedPredicate(t *testing.T) {
 	data := []byte(`{"some":"report"}`)
 	_, origin := keptOrigin(t, data)
 
-	envs, err := EnvelopesFromOrigin(t.Context(), origin)
+	envs, err := EnvelopesFromOrigin(t.Context(), origin, repository.ReassembleOptions{})
 	require.NoError(t, err)
 	require.Len(t, envs, 1)
 	require.JSONEq(t, string(data), string(envs[0].GetPredicate().GetData()))
@@ -85,8 +86,10 @@ func TestEnvelopesFromOriginReassembles(t *testing.T) {
 	const moniker = "test-reassembler"
 	fake := &fakeEnvelope{}
 	var got *intoto.ResourceDescriptor
-	require.NoError(t, RegisterReassembler(moniker, func(_ context.Context, origin *intoto.ResourceDescriptor) ([]attestation.Envelope, error) {
+	var gotKeys []key.PublicKeyProvider
+	require.NoError(t, RegisterReassembler(moniker, func(_ context.Context, origin *intoto.ResourceDescriptor, opts repository.ReassembleOptions) ([]attestation.Envelope, error) {
 		got = origin
+		gotKeys = opts.Keys
 		return []attestation.Envelope{fake}, nil
 	}))
 	t.Cleanup(func() { UnregisterReassembler(moniker) })
@@ -97,10 +100,18 @@ func TestEnvelopesFromOriginReassembles(t *testing.T) {
 	origin := &intoto.ResourceDescriptor{Content: []byte("material"), MediaType: "application/x-something"}
 	require.NoError(t, repository.Annotate(origin, moniker, map[string]any{"key": "value"}))
 
-	envs, err := EnvelopesFromOrigin(t.Context(), origin)
+	// The options reach the reassembler
+	priv, err := key.NewGenerator().GenerateKeyPair()
+	require.NoError(t, err)
+	pub, err := priv.PublicKey()
+	require.NoError(t, err)
+	keys := []key.PublicKeyProvider{pub}
+
+	envs, err := EnvelopesFromOrigin(t.Context(), origin, repository.ReassembleOptions{Keys: keys})
 	require.NoError(t, err)
 	require.Equal(t, []attestation.Envelope{fake}, envs)
 	require.Same(t, origin, got)
+	require.Equal(t, keys, gotKeys)
 	require.Equal(t, map[string]any{"key": "value"}, repository.Material(got))
 }
 
@@ -108,7 +119,7 @@ func TestEnvelopesFromOriginErrors(t *testing.T) {
 	t.Parallel()
 	const moniker = "test-failing-reassembler"
 	errFailed := errors.New("failed")
-	require.NoError(t, RegisterReassembler(moniker, func(context.Context, *intoto.ResourceDescriptor) ([]attestation.Envelope, error) {
+	require.NoError(t, RegisterReassembler(moniker, func(context.Context, *intoto.ResourceDescriptor, repository.ReassembleOptions) ([]attestation.Envelope, error) {
 		return nil, errFailed
 	}))
 	t.Cleanup(func() { UnregisterReassembler(moniker) })
@@ -132,7 +143,7 @@ func TestEnvelopesFromOriginErrors(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := EnvelopesFromOrigin(t.Context(), tc.origin)
+			_, err := EnvelopesFromOrigin(t.Context(), tc.origin, repository.ReassembleOptions{})
 			require.ErrorIs(t, err, tc.err)
 		})
 	}
@@ -141,7 +152,7 @@ func TestEnvelopesFromOriginErrors(t *testing.T) {
 		t.Parallel()
 		_, err := EnvelopesFromOrigin(t.Context(), &intoto.ResourceDescriptor{
 			Content: []byte("{ not json"), MediaType: "application/vnd.dsse.envelope.v1+json",
-		})
+		}, repository.ReassembleOptions{})
 		require.Error(t, err)
 		require.NotErrorIs(t, err, ErrCannotReassemble)
 	})
@@ -158,7 +169,7 @@ func TestDefaultReassemblers(t *testing.T) {
 	for _, moniker := range []string{coci.TypeMoniker, gitsign.TypeMoniker, pypi.TypeMoniker} {
 		origin := &intoto.ResourceDescriptor{Content: []byte("not what the repository kept")}
 		require.NoError(t, repository.Annotate(origin, moniker, nil))
-		_, err := EnvelopesFromOrigin(t.Context(), origin)
+		_, err := EnvelopesFromOrigin(t.Context(), origin, repository.ReassembleOptions{})
 		require.Error(t, err, moniker)
 		require.NotErrorIs(t, err, ErrCannotReassemble, moniker)
 	}

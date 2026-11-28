@@ -365,7 +365,9 @@ func reassemblyMaterial(publisher json.RawMessage, dist *Distribution) (map[stri
 // read from the content, and the statement is synthesized again from it and
 // from the publisher and the distribution recorded as reassembly material.
 // The envelope verifies as it did when first read: over the signed payload.
-func Reassemble(_ context.Context, origin *gointoto.ResourceDescriptor) ([]attestation.Envelope, error) {
+//
+// The options are not used: the envelope carries the material to verify it.
+func Reassemble(_ context.Context, origin *gointoto.ResourceDescriptor, _ repository.ReassembleOptions) ([]attestation.Envelope, error) {
 	env := &bundle.Envelope{}
 	if err := protojson.Unmarshal(origin.GetContent(), &env.Bundle); err != nil {
 		return nil, fmt.Errorf("decoding kept bundle: %w", err)

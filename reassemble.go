@@ -50,14 +50,17 @@ func UnregisterReassembler(moniker string) {
 
 // EnvelopesFromOrigin reads back the attestations kept in an origin, as a
 // repository returned them when it was asked to keep their content (see the
-// KeepContent fetch option). They come back as read: not verified, and with
-// the origin they were read from as their own.
+// KeepContent fetch option). They come back as read, with the origin they
+// were read from as their own, and are verified as any attestation is.
 //
 // Content of a media type an envelope parser reads is the attestation
 // itself and is parsed. Any other content is what an attestation was built
 // from: the origin names the repository type that kept it, and the
-// reassembler registered for that type builds the attestation again.
-func EnvelopesFromOrigin(ctx context.Context, origin *intoto.ResourceDescriptor) ([]attestation.Envelope, error) {
+// reassembler registered for that type builds the attestation again. The
+// options carry what the repository was configured with and the origin does
+// not record, such as the keys to verify signatures with; parsed content
+// does not use them.
+func EnvelopesFromOrigin(ctx context.Context, origin *intoto.ResourceDescriptor, opts repository.ReassembleOptions) ([]attestation.Envelope, error) {
 	if len(origin.GetContent()) == 0 {
 		return nil, ErrNoContent
 	}
@@ -81,7 +84,7 @@ func EnvelopesFromOrigin(ctx context.Context, origin *intoto.ResourceDescriptor)
 			return nil, fmt.Errorf("%w: no reassembler for repository type %q", ErrCannotReassemble, moniker)
 		}
 		var err error
-		envs, err = reassemble(ctx, origin)
+		envs, err = reassemble(ctx, origin, opts)
 		if err != nil {
 			return nil, fmt.Errorf("reassembling with repository type %q: %w", moniker, err)
 		}
