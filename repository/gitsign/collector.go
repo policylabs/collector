@@ -221,10 +221,24 @@ func (c *Collector) Fetch(ctx context.Context, opts attestation.FetchOptions) ([
 			logrus.Debugf("gitsign: skipping tag %s: %v", components.Tag, err)
 			return []attestation.Envelope{}, nil
 		}
+		if opts.KeepContent {
+			ref, err := repo.Tag(components.Tag)
+			if err != nil {
+				return nil, fmt.Errorf("resolving tag %s: %w", components.Tag, err)
+			}
+			if err := c.keepObject(repo, env, plumbing.TagObject, ref.Hash(), components.Tag); err != nil {
+				return nil, fmt.Errorf("keeping tag %s: %w", components.Tag, err)
+			}
+		}
 	} else {
 		env, err = c.buildVirtualAttestation(ctx, repo, components.Commit)
 		if err != nil {
 			return nil, fmt.Errorf("building attestation for commit %s: %w", components.Commit, err)
+		}
+		if opts.KeepContent {
+			if err := c.keepObject(repo, env, plumbing.CommitObject, plumbing.NewHash(components.Commit), ""); err != nil {
+				return nil, fmt.Errorf("keeping commit %s: %w", components.Commit, err)
+			}
 		}
 	}
 
@@ -303,6 +317,11 @@ func (c *Collector) FetchBySubject(ctx context.Context, opts attestation.FetchOp
 		if err != nil {
 			logrus.Debugf("gitsign: skipping commit %s: %v", hash, err)
 			continue
+		}
+		if opts.KeepContent {
+			if err := c.keepObject(repo, env, plumbing.CommitObject, plumbing.NewHash(hash), ""); err != nil {
+				return nil, fmt.Errorf("keeping commit %s: %w", hash, err)
+			}
 		}
 		ret = append(ret, env)
 	}

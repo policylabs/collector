@@ -109,7 +109,8 @@ func LoadDefaultRepositoryTypes() error {
 	}
 	// The repository types that keep content only they can read back
 	for t, reassembler := range map[string]repository.Reassembler{
-		pypi.TypeMoniker: pypi.Reassemble,
+		gitsign.TypeMoniker: gitsign.Reassemble,
+		pypi.TypeMoniker:    pypi.Reassemble,
 	} {
 		if err := RegisterReassembler(t, reassembler); err != nil {
 			if !errors.Is(err, ErrTypeAlreadyRegistered) {

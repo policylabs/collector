@@ -17,6 +17,7 @@ import (
 
 	"github.com/policylabs/collector/envelope"
 	"github.com/policylabs/collector/repository"
+	"github.com/policylabs/collector/repository/gitsign"
 	"github.com/policylabs/collector/repository/pypi"
 )
 
@@ -151,11 +152,15 @@ func TestDefaultReassemblers(t *testing.T) {
 	t.Parallel()
 	require.NoError(t, LoadDefaultRepositoryTypes())
 
-	origin := &intoto.ResourceDescriptor{Content: []byte("not a bundle")}
-	require.NoError(t, repository.Annotate(origin, pypi.TypeMoniker, nil))
-	_, err := EnvelopesFromOrigin(t.Context(), origin)
-	require.Error(t, err)
-	require.NotErrorIs(t, err, ErrCannotReassemble)
+	// Each one is reached: content it cannot use fails in the reassembler,
+	// not for want of one.
+	for _, moniker := range []string{gitsign.TypeMoniker, pypi.TypeMoniker} {
+		origin := &intoto.ResourceDescriptor{Content: []byte("not what the repository kept")}
+		require.NoError(t, repository.Annotate(origin, moniker, nil))
+		_, err := EnvelopesFromOrigin(t.Context(), origin)
+		require.Error(t, err, moniker)
+		require.NotErrorIs(t, err, ErrCannotReassemble, moniker)
+	}
 }
 
 // fakeEnvelope is an envelope with nothing in it.
