@@ -129,9 +129,31 @@ func KeepStatement(env attestation.Envelope) error {
 	if err != nil {
 		return fmt.Errorf("serializing statement: %w", err)
 	}
+	return KeepData(env, data, bare.MediaType)
+}
+
+// KeepData records data as the content of the origin of an attestation's
+// predicate, with its media type, and makes the digest of the origin the
+// digest of data.
+//
+// It is for the repositories that do not read an attestation as one piece of
+// data, where KeepContent has nothing to keep: they build the envelope from
+// several (a signed payload in one place and what verifies it in another)
+// and keep it as they serialize it, or as the piece that is the attestation.
+// The data must be what the media type says, so that it reads back.
+//
+// The name and URI of the origin are left as they were: they still say where
+// the attestation came from. An attestation without an origin gets one.
+func KeepData(env attestation.Envelope, data []byte, mediaType string) error {
+	if env == nil || env.GetPredicate() == nil {
+		return errors.New("attestation has no predicate to keep content for")
+	}
+	if len(data) == 0 {
+		return errors.New("no data to keep")
+	}
 	digests, err := hasher.New().HashReaders([]io.Reader{bytes.NewReader(data)})
 	if err != nil || len(*digests) == 0 {
-		return fmt.Errorf("hashing statement: %w", err)
+		return fmt.Errorf("hashing content: %w", err)
 	}
 	kept := digests.ToResourceDescriptors()[0]
 
@@ -142,7 +164,7 @@ func KeepStatement(env attestation.Envelope) error {
 	}
 	rd.Digest = kept.GetDigest()
 	rd.Content = data
-	rd.MediaType = bare.MediaType
+	rd.MediaType = mediaType
 	return nil
 }
 

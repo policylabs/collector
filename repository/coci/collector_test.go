@@ -54,7 +54,7 @@ func TestBuildPlainDSSEEnvelope(t *testing.T) {
 		},
 	}
 
-	env, err := buildPlainDSSEEnvelope(dsseEnv, "oci:example.com/repo:sha256-abc.att")
+	env, err := buildPlainDSSEEnvelope(dsseEnv, "oci:example.com/repo:sha256-abc.att", nil)
 	require.NoError(t, err)
 	require.NotNil(t, env)
 	require.NotNil(t, env.GetStatement())
