@@ -128,6 +128,22 @@ func (c *Collector) getSignatureEnvelope(ctx context.Context, opts *attestation.
 		return nil, fmt.Errorf("reading signature payload: %w", err)
 	}
 
+	env, err := c.signatureEnvelope(imageInfo, layer, payload)
+	if err != nil {
+		return nil, err
+	}
+	if opts.KeepContent {
+		if err := keepSignature(env, imageInfo, layer, payload); err != nil {
+			return nil, fmt.Errorf("keeping signature payload: %w", err)
+		}
+	}
+	return env, nil
+}
+
+// signatureEnvelope builds the attestation of a cosign signature from the
+// payload of its layer and from the signature and the material to verify it,
+// which the layer carries in its annotations.
+func (c *Collector) signatureEnvelope(imageInfo *ImageInfo, layer *ggcr.Descriptor, payload []byte) (attestation.Envelope, error) {
 	// Read the base64-encoded signature from the annotation
 	sigB64, ok := layer.Annotations["dev.cosignproject.cosign/signature"]
 	if !ok {

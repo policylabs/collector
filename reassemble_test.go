@@ -17,6 +17,7 @@ import (
 
 	"github.com/policylabs/collector/envelope"
 	"github.com/policylabs/collector/repository"
+	"github.com/policylabs/collector/repository/coci"
 	"github.com/policylabs/collector/repository/gitsign"
 	"github.com/policylabs/collector/repository/pypi"
 )
@@ -154,7 +155,7 @@ func TestDefaultReassemblers(t *testing.T) {
 
 	// Each one is reached: content it cannot use fails in the reassembler,
 	// not for want of one.
-	for _, moniker := range []string{gitsign.TypeMoniker, pypi.TypeMoniker} {
+	for _, moniker := range []string{coci.TypeMoniker, gitsign.TypeMoniker, pypi.TypeMoniker} {
 		origin := &intoto.ResourceDescriptor{Content: []byte("not what the repository kept")}
 		require.NoError(t, repository.Annotate(origin, moniker, nil))
 		_, err := EnvelopesFromOrigin(t.Context(), origin)
